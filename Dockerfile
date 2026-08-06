@@ -2,15 +2,16 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# 安装系统依赖和 Chrome 浏览器（修复版）
+# 安装系统依赖和 Chrome（直接下载 .deb 包，避免仓库签名问题）
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
     unzip \
     curl \
-    && curl -sSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
-    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
-    && apt-get update && apt-get install -y google-chrome-stable \
+    xz-utils \
+    && wget -q -O google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+    && apt-get install -y ./google-chrome.deb || apt-get install -f -y \
+    && rm google-chrome.deb \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装 Python 依赖
@@ -20,9 +21,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 复制项目文件
 COPY . .
 
-# 创建数据目录（持久化）
 RUN mkdir -p /app/data
 
-EXPOSE 5000
+EXPOSE 5678
 
 CMD ["python", "app.py"]
