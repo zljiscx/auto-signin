@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block title %}站点列表 - 自动签到{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h2><i class="fas fa-globe"></i> 站点管理</h2>
+    <a href="{{ url_for('add') }}" class="btn btn-success">
+        <i class="fas fa-plus-circle"></i> 添加站点
+    </a>
+</div>
+
+<div class="card">
+    <div class="card-body">
+        <div class="table-responsive">
+            <table class="table table-hover table-striped align-middle">
+                <thead>
+                    <tr>
+                        <th>站点名称</th>
+                        <th>签到地址</th>
+                        <th>验证码</th>
+                        <th>Cloudflare</th>
+                        <th>状态</th>
+                        <th>上次签到</th>
+                        <th>结果</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for site in sites %}
+                <tr>
+                    <td><strong>{{ site.name }}</strong></td>
+                    <td><a href="{{ site.sign_url }}" target="_blank" title="点击打开签到页">{{ site.sign_url[:30] }}{% if site.sign_url|length > 30 %}…{% endif %}</a></td>
+                    <td>{% if site.has_captcha %}<span class="badge bg-warning text-dark">有</span>{% else %}<span class="badge bg-secondary">无</span>{% endif %}</td>
+                    <td>{% if site.has_cloudflare %}<span class="badge bg-danger">有</span>{% else %}<span class="badge bg-secondary">无</span>{% endif %}</td>
+                    <td>{% if site.enabled %}<span class="badge bg-success">启用</span>{% else %}<span class="badge bg-secondary">禁用</span>{% endif %}</td>
+                    <td>{{ site.last_sign_time or '-' }}</td>
+                    <td>
+                        {% if site.sign_success == 1 %}
+                            <span class="badge bg-success"><i class="fas fa-check"></i> 成功</span>
+                        {% elif site.sign_success == 0 and site.last_sign_time %}
+                            <span class="badge bg-danger"><i class="fas fa-times"></i> 失败</span>
+                        {% else %}
+                            <span class="badge bg-secondary">未签到</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <div class="btn-group btn-group-sm" role="group">
+                            <a href="{{ url_for('edit', sid=site.id) }}" class="btn btn-outline-primary" title="编辑">
+                                <i class="fas fa-edit"></i>
+                            </a>
+                            <a href="{{ url_for('manual_sign', sid=site.id) }}" class="btn btn-outline-success" title="手动签到">
+                                <i class="fas fa-play"></i>
+                            </a>
+                            <a href="{{ url_for('delete', sid=site.id) }}" class="btn btn-outline-danger" title="删除" onclick="return confirm('确定删除站点「{{ site.name }}」吗？')">
+                                <i class="fas fa-trash-alt"></i>
+                            </a>
+                        </div>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="8" class="text-center text-muted">暂无站点，请点击「添加站点」创建。</td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

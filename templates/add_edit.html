@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+
+{% block extra_css %}
+<style>
+    .label-width {
+        width: 130px;  /* 统一标签宽度，修改此处即可全局调整 */
+        flex-shrink: 0;    /* 防止被压缩 */
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-lg-8 col-xl-7">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h4 class="mb-0"><i class="fas fa-{{ 'edit' if site else 'plus-circle' }}"></i> {{ '编辑站点' if site else '添加站点' }}</h4>
+            </div>
+            <div class="card-body">
+                <form method="post">
+                    <!-- 基础信息 -->
+                    <div class="d-flex align-items-center mb-3">
+                        <label for="name" class="label-width fw-bold text-nowrap me-2">站点名称：<span class="text-danger">*</span></label>
+                        <input type="text" class="form-control flex-grow-1" id="name" name="name" value="{{ site.name if site else '' }}" required>
+                    </div>
+
+                    <div class="d-flex align-items-center mb-3">
+                        <label for="sign_url" class="label-width fw-bold text-nowrap me-2">签到地址：<span class="text-danger">*</span></label>
+                        <input type="url" class="form-control flex-grow-1" id="sign_url" name="sign_url" value="{{ site.sign_url if site else '' }}" required>
+                    </div>
+
+                    <div class="d-flex align-items-center mb-3">
+                        <label for="login_url" class="label-width fw-bold text-nowrap me-2">登录地址：</label>
+                        <input type="url" class="form-control flex-grow-1" id="login_url" name="login_url" value="{{ site.login_url if site else '' }}">
+                    </div>
+
+                    <!-- 登录凭证 -->
+                    <div class="d-flex align-items-center mb-3">
+                        <label for="username" class="label-width fw-bold text-nowrap me-2">用户名：</label>
+                        <input type="text" class="form-control flex-grow-1" id="username" name="username" value="{{ site.username if site else '' }}">
+                    </div>
+
+                    <div class="d-flex align-items-center mb-3">
+                        <label for="password" class="label-width fw-bold text-nowrap me-2">密码：</label>
+                        <input type="password" class="form-control flex-grow-1" id="password" name="password" value="{{ site.password if site else '' }}">
+                    </div>
+
+                    <div class="d-flex align-items-start mb-3">
+                        <label for="cookies" class="label-width fw-bold text-nowrap me-2" style="padding-top: 0.375rem;">Cookies（可选）：</label>
+                        <textarea class="form-control flex-grow-1" id="cookies" name="cookies" rows="4" placeholder="粘贴浏览器复制的Cookies，支持多种格式。留空则自动通过登录获取。">{{ cookies_text if cookies_text else '' }}</textarea>
+                    </div>
+
+                    <!-- 开关（两端对齐） -->
+                    <div class="d-flex align-items-center mb-3">
+                        <div class="label-width me-2"></div> <!-- 占位，保持对齐 -->
+                        <div class="d-flex flex-wrap justify-content-between flex-grow-1">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="enabled" name="enabled" {% if (site and site.enabled) or not site %}checked{% endif %}>
+                                <label class="form-check-label" for="enabled">启用站点签到</label>
+                            </div>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="has_captcha" name="has_captcha" {% if site and site.has_captcha %}checked{% endif %}>
+                                <label class="form-check-label" for="has_captcha">有验证码</label>
+                            </div>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="has_cloudflare" name="has_cloudflare" {% if site and site.has_cloudflare %}checked{% endif %}>
+                                <label class="form-check-label" for="has_cloudflare">有 Cloudflare 验证</label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 操作按钮（靠右对齐） -->
+                    <div class="d-flex justify-content-end gap-2">
+                        <button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> 保存</button>
+                        <a href="{{ url_for('index') }}" class="btn btn-secondary"><i class="fas fa-arrow-left"></i> 返回列表</a>
+                    </div>
+
+                    <hr class="my-4">
+                    <h6 class="mb-3"><i class="fas fa-code"></i> <strong class="fw-bold">登录表单自定义选择器（可选，留空自动适配）</strong></h6>
+
+                    <!-- 选择器 -->
+                    <div class="d-flex align-items-center mb-2">
+                        <label for="username_selector" class="label-width text-nowrap me-2">用户名输入框：</label>
+                        <input type="text" class="form-control flex-grow-1" id="username_selector" name="username_selector"
+                               value="{{ site.username_selector if site else '' }}" placeholder='如：input[name="username"]'>
+                    </div>
+
+                    <div class="d-flex align-items-center mb-2">
+                        <label for="password_selector" class="label-width text-nowrap me-2">密码输入框：</label>
+                        <input type="text" class="form-control flex-grow-1" id="password_selector" name="password_selector"
+                               value="{{ site.password_selector if site else '' }}" placeholder='如：input[name="password"]'>
+                    </div>
+
+                    <div class="d-flex align-items-center mb-2">
+                        <label for="captcha_img_selector" class="label-width text-nowrap me-2">验证码图片：</label>
+                        <input type="text" class="form-control flex-grow-1" id="captcha_img_selector" name="captcha_img_selector"
+                               value="{{ site.captcha_img_selector if site else '' }}" placeholder='如：img[src*="captcha"]'>
+                    </div>
+
+                    <div class="d-flex align-items-center mb-2">
+                        <label for="captcha_input_selector" class="label-width text-nowrap me-2">验证码输入框：</label>
+                        <input type="text" class="form-control flex-grow-1" id="captcha_input_selector" name="captcha_input_selector"
+                               value="{{ site.captcha_input_selector if site else '' }}" placeholder='如：input[name="captcha"]'>
+                    </div>
+
+                    <div class="d-flex align-items-center mb-2">
+                        <label for="submit_selector" class="label-width text-nowrap me-2">登录按钮：</label>
+                        <input type="text" class="form-control flex-grow-1" id="submit_selector" name="submit_selector"
+                               value="{{ site.submit_selector if site else '' }}" placeholder='如：button[type="submit"]'>
+                    </div>
+
+                    <div class="d-flex align-items-center mb-3">
+                        <label for="sign_button_selector" class="label-width text-nowrap me-2">签到按钮：</label>
+                        <input type="text" class="form-control flex-grow-1" id="sign_button_selector" name="sign_button_selector"
+                               value="{{ site.sign_button_selector if site else '' }}" placeholder='如：button:has-text("签到")'>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

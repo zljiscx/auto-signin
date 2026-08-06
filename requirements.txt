@@ -1,0 +1,5 @@
+Flask==2.3.3
+apscheduler==3.10.4
+requests==2.31.0
+DrissionPage==4.0.4
+cryptography==42.0.7

@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+
+{% block extra_css %}
+<style>
+    .label-width {
+        width: 130px;          /* 与 add_edit.html 保持一致 */
+        flex-shrink: 0;        /* 防止被压缩 */
+    }
+</style>
+{% endblock %}
+
+{% block title %}全局设置 - 自动签到{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-8 col-lg-7">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h4 class="mb-0"><i class="fas fa-sliders-h"></i> 全局设置</h4>
+            </div>
+            <div class="card-body">
+                <form method="post">
+                    <!-- 每日签到时间 -->
+                    <div class="d-flex align-items-center mb-3">
+                        <label for="sign_time" class="label-width fw-bold text-nowrap me-2">签到时间：<span class="text-danger">*</span></label>
+                        <input type="time" class="form-control flex-grow-1" id="sign_time" name="sign_time" value="{{ configs.get('sign_time', '05:05') }}" required>
+                    </div>
+
+                    <!-- 重试次数 -->
+                    <div class="d-flex align-items-center mb-3">
+                        <label for="retry_times" class="label-width fw-bold text-nowrap me-2">重试次数：<span class="text-danger">*</span></label>
+                        <input type="number" class="form-control flex-grow-1" id="retry_times" name="retry_times" value="{{ configs.get('retry_times', 3) }}" min="1" max="10" required>
+                    </div>
+
+                    <div class="d-flex align-items-center mb-3">
+                        <label class="label-width fw-bold text-nowrap me-2">浏览器模式：</label>
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="headless" name="headless" value="1" {% if configs.get('headless') == '1' %}checked{% endif %}>
+                            <label class="form-check-label" for="headless">无头模式（后台运行）</label>
+                        </div>
+                    </div>
+
+                    <hr class="my-4">
+                    <!-- 在 <hr> 之后，<h6> 之前添加 -->
+
+                    <h6 class="mb-3"><i class="fas fa-brain"></i> <strong>百度 OCR 配置（用于验证码识别）</strong></h6>
+
+                    <!-- API Key -->
+                    <div class="d-flex align-items-center mb-3">
+                        <label for="ocr_api_key" class="label-width fw-bold text-nowrap me-2">API Key：</label>
+                        <input type="text" class="form-control flex-grow-1" id="ocr_api_key" name="ocr_api_key" value="{{ configs.get('ocr_api_key', '') }}">
+                    </div>
+
+                    <!-- Secret Key -->
+                    <div class="d-flex align-items-center mb-3">
+                        <label for="ocr_secret_key" class="label-width fw-bold text-nowrap me-2">Secret Key：</label>
+                        <input type="text" class="form-control flex-grow-1" id="ocr_secret_key" name="ocr_secret_key" value="{{ configs.get('ocr_secret_key', '') }}">
+                    </div>
+
+                    <hr class="my-4">
+                    <h6 class="mb-3"><i class="fas fa-bell"></i> <strong>企业微信消息推送</strong></h6>
+
+                    <div class="d-flex align-items-center mb-3">
+                        <label for="wecom_webhook_key" class="label-width fw-bold text-nowrap me-2">Webhook Key：</label>
+                        <input type="text" class="form-control flex-grow-1" id="wecom_webhook_key" name="wecom_webhook_key"
+                            value="{{ configs.get('wecom_webhook_key', '') }}" placeholder="如：33256f8a-874b-49e2-be6d-f77f82c77e4e">
+                    </div>
+                    <!-- 操作按钮（靠右对齐） -->
+                    <div class="d-flex justify-content-end gap-2">
+                        <button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> 保存设置</button>
+                        <a href="{{ url_for('index') }}" class="btn btn-secondary"><i class="fas fa-arrow-left"></i> 返回列表</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
