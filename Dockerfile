@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM python:3.11-slim
 
 # 安装 Chromium 和依赖
 RUN apt-get update && apt-get install -y \
