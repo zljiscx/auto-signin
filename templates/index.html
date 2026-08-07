@@ -53,8 +53,8 @@
                                 <i class="fas fa-play"></i>
                             </a>
                             {% if site.has_cloudflare %}
-                            <button class="btn btn-outline-warning remote-debug-btn" data-sid="{{ site.id }}" title="远程验证（Cloudflare）">
-                                <i class="fas fa-link"></i>
+                            <button class="btn btn-outline-warning btn-sm upload-user-data-btn" data-sid="{{ site.id }}" title="上传用户数据目录（用于绕过Cloudflare验证）">
+                                <i class="fas fa-folder"></i>
                             </button>
                             {% endif %}
                             <a href="{{ url_for('delete', sid=site.id) }}" class="btn btn-outline-danger" title="删除" onclick="return confirm('确定删除站点「{{ site.name }}」吗？')">
@@ -78,27 +78,44 @@
 {{ super() }}
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-    document.querySelectorAll('.remote-debug-btn').forEach(function(btn) {
+    document.querySelectorAll('.upload-user-data-btn').forEach(function(btn) {
         btn.addEventListener('click', function(e) {
             e.preventDefault();
             var sid = this.getAttribute('data-sid');
-            var url = '/remote_debug_start/' + sid;
-            // 先请求后端启动调试浏览器
-            fetch(url)
+            // 创建隐藏的 file input，选择整个目录
+            var input = document.createElement('input');
+            input.type = 'file';
+            input.webkitdirectory = true;
+            input.multiple = true;
+            input.onchange = function() {
+                var files = this.files;
+                if (files.length === 0) return;
+                var formData = new FormData();
+                for (var i = 0; i < files.length; i++) {
+                    var file = files[i];
+                    // 使用 webkitRelativePath 作为文件名（保留路径）
+                    formData.append('files', file, file.webkitRelativePath);
+                }
+                // 禁用按钮防止重复点击
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+                fetch('/upload_user_data/' + sid, {
+                    method: 'POST',
+                    body: formData
+                })
                 .then(response => response.json())
                 .then(data => {
-                    if (data.success) {
-                        // 自动打开远程调试页面
-                        var host = window.location.hostname;
-                        var debugUrl = 'http://' + host + ':9222';
-                        window.open(debugUrl, '_blank');
-                    } else {
-                        alert('启动调试失败: ' + data.message);
-                    }
+                    alert(data.message);
                 })
                 .catch(err => {
-                    alert('请求失败: ' + err);
+                    alert('上传失败: ' + err);
+                })
+                .finally(() => {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fas fa-folder"></i>';
                 });
+            };
+            input.click();
         });
     });
 });
