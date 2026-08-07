@@ -60,7 +60,7 @@ class DrissionPageDriver(BrowserDriver):
             co.set_argument('--disable-dev-shm-usage')
 
         # 固定窗口大小
-        co.set_argument('--window-size=1200,800')
+        # co.set_argument('--window-size=1200,900')
 
         user_data_dir = get_user_data_dir()
         os.makedirs(user_data_dir, exist_ok=True)
@@ -68,9 +68,8 @@ class DrissionPageDriver(BrowserDriver):
         logging.info(f"用户数据目录: {user_data_dir}")
 
         # 反检测参数（降低被识别为自动化的风险）
-        co.set_argument('--disable-blink-features=AutomationControlled')
-        co.set_argument(
-            '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+        # co.set_argument('--disable-blink-features=AutomationControlled')
+        # co.set_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
 
         self.page = ChromiumPage(co)
 
@@ -255,7 +254,7 @@ def perform_login(driver, site, ocr_config):
     clicked = driver.page.run_js(js_click)
     logging.info(f"登录按钮点击结果: {clicked}")
 
-    max_wait = 15
+    max_wait = 30
     start_time = time.time()
     while time.time() - start_time < max_wait:
         if not is_login_page(driver):
@@ -292,12 +291,13 @@ def click_sign_button(driver, site):
             return False
 
 
-def sign_site(site, ocr_config, retry_times=3):
+def sign_site(site, ocr_config, retry_times=3, is_manual=False):
     sid = site['id']
     name = site['name']
     sign_url = site['sign_url']
     login_url = site.get('login_url', '')
     has_captcha = bool(site.get('has_captcha', 0))
+    has_cloudflare = bool(site.get('has_cloudflare', 0))
 
     # 解密 cookies
     cookies_json_enc = site.get('cookies')
@@ -322,88 +322,116 @@ def sign_site(site, ocr_config, retry_times=3):
     attempt = 0
     success = False
     msg = ''
+    s = 5
 
     try:
-        while attempt < retry_times:
-            attempt += 1
-            logging.info(f"签到尝试 {attempt}/{retry_times}")
+        # 打开签到页，加载完成
+        driver.open(sign_url)
+        driver.wait_for_load(10)
+        time.sleep(2)
 
+        # 如果有 Cloudflare 验证，进行特殊处理
+        if has_cloudflare:
+            if is_manual:
+                # 手动签到：持续等待直到验证消失
+                logging.info("手动签到，检测到 Cloudflare 验证，持续等待...")
+                while True:
+                    html = driver.get_page_source()
+                    if '安全验证' in html or '正在验证' in html:
+                        logging.info(f"仍存在 Cloudflare 验证，等待{s}秒...")
+                        time.sleep(s)
+                    else:
+                        logging.info("Cloudflare 验证已通过，继续执行签到")
+                        break
+            else:
+                # 自动签到：等待最多10秒，超时则直接失败
+                logging.info("自动签到，检测到 Cloudflare 验证，等待最多10秒...")
+                for i in range(10):
+                    html = driver.get_page_source()
+                    if '安全验证' in html or '正在验证' in html:
+                        if i == 9:
+                            msg = "Cloudflare 验证超时，签到失败"
+                            logging.warning(msg)
+                            return False, msg
+                        time.sleep(1)
+                    else:
+                        logging.info("Cloudflare 验证已通过，继续执行签到")
+                        break
+
+        # 如果设置了 cookies，则设置并重新打开页面
+        if cookies_list:
+            driver.set_cookies(cookies_list)
             driver.open(sign_url)
             driver.wait_for_load(10)
             time.sleep(2)
 
-            if cookies_list:
-                driver.set_cookies(cookies_list)
-                driver.open(sign_url)
-                driver.wait_for_load(10)
-                time.sleep(2)
-
-            if is_login_page(driver) or (login_url and login_url in driver.get_current_url()):
-                logging.info("检测到需要登录")
-                login_ok = perform_login(driver, site, ocr_config)
-                if not login_ok:
-                    msg = f"登录失败 (尝试 {attempt})"
-                    time.sleep(3)
-                    continue
-
-                # 登录成功，保存 cookies
-                time.sleep(1)
-                new_cookies = driver.get_cookies()
-                allowed = {'name', 'value', 'domain', 'path', 'expires', 'httpOnly', 'secure'}
-                filtered_new = [{k: v for k, v in c.items() if k in allowed} for c in new_cookies if
-                                'name' in c and 'value' in c]
-                cookies_json = json.dumps(filtered_new)
-                # 加密保存
-                from utils import encrypt_data
-                encrypted_cookies = encrypt_data(cookies_json)
-                update_site_cookies(sid, encrypted_cookies)
-                cookies_list = filtered_new
-                logging.info(f"已保存 {len(filtered_new)} 个 Cookie")
-
-                # 重新访问签到页
-                retry = 0
-                while retry < 3:
-                    try:
-                        driver.open(sign_url)
-                        driver.wait_for_load(10)
-                        time.sleep(2)
-                        break
-                    except Exception as e:
-                        retry += 1
-                        logging.warning(f"访问签到页失败 (重试 {retry}/3): {e}")
-                        time.sleep(2)
-                else:
-                    logging.error("访问签到页失败，跳过本次")
-                    continue
-
-            # 检测签到标识
-            html = driver.get_page_source()
-            keywords = ['签到成功', '簽到成功', '已经签到', '已經簽到']
-            if any(kw in html for kw in keywords):
-                success = True
-                msg = "签到成功（检测到标识文字）"
-                logging.info(msg)
-                break
-
-            # 尝试点击签到按钮
-            logging.info("未检测到签到标识，尝试点击签到按钮")
-            clicked = click_sign_button(driver, site)
-            if clicked:
-                time.sleep(3)
-                html_after = driver.get_page_source()
-                if any(kw in html_after for kw in keywords):
-                    success = True
-                    msg = "签到成功（点击按钮后）"
-                    logging.info(msg)
-                    break
-                else:
-                    msg = "点击按钮后未检测到成功标识"
-                    logging.warning(msg)
-            else:
-                msg = "未找到签到按钮且无成功标识"
+        # 判断是否需要登录
+        if is_login_page(driver) or (login_url and login_url in driver.get_current_url()):
+            logging.info("检测到需要登录")
+            login_ok = perform_login(driver, site, ocr_config)
+            if not login_ok:
+                msg = "登录失败"
                 logging.warning(msg)
+                return False, msg
 
-            time.sleep(5)
+            # 登录成功，保存 cookies
+            time.sleep(1)
+            new_cookies = driver.get_cookies()
+            allowed = {'name', 'value', 'domain', 'path', 'expires', 'httpOnly', 'secure'}
+            filtered_new = [{k: v for k, v in c.items() if k in allowed} for c in new_cookies if
+                            'name' in c and 'value' in c]
+            cookies_json = json.dumps(filtered_new)
+            from utils import encrypt_data
+            encrypted_cookies = encrypt_data(cookies_json)
+            update_site_cookies(sid, encrypted_cookies)
+            cookies_list = filtered_new
+            logging.info(f"已保存 {len(filtered_new)} 个 Cookie")
+
+            # 重新访问签到页
+            retry = 0
+            while retry < 3:
+                try:
+                    driver.open(sign_url)
+                    driver.wait_for_load(10)
+                    time.sleep(2)
+                    break
+                except Exception as e:
+                    retry += 1
+                    logging.warning(f"访问签到页失败 (重试 {retry}/3): {e}")
+                    time.sleep(2)
+            else:
+                logging.error("访问签到页失败，跳过本次")
+                return False, "访问签到页失败"
+
+        # 检测签到标识
+        html = driver.get_page_source()
+        keywords = ['签到成功', '簽到成功', '已经签到', '已經簽到']
+        if any(kw in html for kw in keywords):
+            success = True
+            msg = "签到成功（检测到标识文字）"
+            logging.info(msg)
+            return success, msg
+
+        # 尝试点击签到按钮
+        logging.info("未检测到签到标识，尝试点击签到按钮")
+        clicked = click_sign_button(driver, site)
+        if clicked:
+            time.sleep(3)
+            html_after = driver.get_page_source()
+            if any(kw in html_after for kw in keywords):
+                success = True
+                msg = "签到成功（点击按钮后）"
+                logging.info(msg)
+                return success, msg
+            else:
+                msg = "点击按钮后未检测到成功标识"
+                logging.warning(msg)
+        else:
+            msg = "未找到签到按钮且无成功标识"
+            logging.warning(msg)
+
+        # 如果到这里说明未成功，返回失败
+        return False, msg
 
     except Exception as e:
         msg = f"异常: {str(e)}"
@@ -413,8 +441,7 @@ def sign_site(site, ocr_config, retry_times=3):
                 f.write(driver.get_page_source())
         except:
             pass
+        return False, msg
     finally:
         driver.close()
         update_site_sign_result(sid, success)
-
-    return success, msg
