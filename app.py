@@ -2,6 +2,8 @@ import json
 import os
 import logging
 import shutil
+import subprocess
+import time
 from datetime import datetime
 from urllib.parse import quote, urlparse
 from flask import Flask, flash, render_template, request, redirect, url_for, Response, jsonify
@@ -12,7 +14,7 @@ from models import (
 from scheduler import start_scheduler, stop_scheduler
 from signer import sign_site
 from utils import (
-    parse_cookies_input, encrypt_data, decrypt_data, normalize_cookies, get_user_data_dir
+    parse_cookies_input, encrypt_data, decrypt_data, normalize_cookies, get_user_data_dir, is_docker
 )
 
 app = Flask(__name__)
@@ -348,16 +350,32 @@ def upload_user_data(sid):
 
     target_dir = get_user_data_dir()
 
-    # 清空目标目录（重新创建）
+    # 1. 杀掉所有 Chromium 进程（释放目录占用）
+    try:
+        if is_docker():
+            subprocess.run(['pkill', '-f', 'chromium'], capture_output=True, check=False)
+        else:
+            # Windows 环境
+            subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe'], capture_output=True, check=False)
+        time.sleep(2)  # 等待进程完全退出
+    except Exception as e:
+        logging.warning(f"结束 Chromium 进程时出错: {e}")
+
+    # 2. 删除目录（如果存在）
     if os.path.exists(target_dir):
-        shutil.rmtree(target_dir)
+        try:
+            shutil.rmtree(target_dir)
+        except OSError as e:
+            logging.error(f"删除目录失败: {e}")
+            return jsonify({'success': False, 'message': f'删除旧数据失败，请稍后重试: {str(e)}'}), 500
+
+    # 3. 重新创建目录
     os.makedirs(target_dir, exist_ok=True)
 
-    # 保存每个文件，保留相对路径
+    # 4. 保存文件，保留相对路径
     for file in files:
-        # 文件名为相对路径（由 webkitRelativePath 提供）
-        relative_path = file.filename
-        full_path = os.path.join(target_dir, relative_path)
+        rel_path = file.filename
+        full_path = os.path.join(target_dir, rel_path)
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         file.save(full_path)
 
