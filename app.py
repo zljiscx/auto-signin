@@ -327,7 +327,8 @@ def manual_sign(sid):
     }
     retry_times = int(configs.get('retry_times', 3))
     try:
-        success, msg = sign_site(site, ocr_config, retry_times)
+        # 传递 is_manual=True
+        success, msg = sign_site(site, ocr_config, retry_times, is_manual=True)
         flash(f'站点「{site["name"]}」签到结果: {"✅ 成功" if success else "❌ 失败"} - {msg}',
               'success' if success else 'danger')
     except Exception as e:
