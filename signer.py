@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 from DrissionPage import ChromiumPage, ChromiumOptions
 from models import update_site_cookies, update_site_sign_result
 from utils import (
-    ocr_captcha, decrypt_data, encrypt_data, get_user_data_dir,
+    ocr_captcha, decrypt_data, encrypt_data, get_user_data_dir, is_docker,
     JS_FILL_TEMPLATE, JS_GET_SRC_TEMPLATE, JS_FILL_CAPTCHA_TEMPLATE, JS_CLICK_TEMPLATE,
     DEFAULT_USERNAME_SELECTORS, DEFAULT_PASSWORD_SELECTORS,
     DEFAULT_CAPTCHA_IMG_SELECTORS, DEFAULT_CAPTCHA_INPUT_SELECTORS,
@@ -15,17 +15,6 @@ from utils import (
 )
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(name)s:%(message)s')
-
-
-def is_docker():
-    """检测是否在 Docker 容器内运行"""
-    if os.path.exists('/.dockerenv'):
-        return True
-    try:
-        with open('/proc/self/cgroup', 'r') as f:
-            return 'docker' in f.read()
-    except:
-        return False
 
 
 class BrowserDriver(ABC):
@@ -66,12 +55,17 @@ class DrissionPageDriver(BrowserDriver):
         if headless:
             co.headless()
 
+        if is_docker():
+            co.set_argument('--no-sandbox')
+            co.set_argument('--disable-dev-shm-usage')
+
         # 固定窗口大小
         co.set_argument('--window-size=1200,800')
 
         user_data_dir = get_user_data_dir()
         os.makedirs(user_data_dir, exist_ok=True)
         co.set_argument(f'--user-data-dir={user_data_dir}')
+        logging.info(f"用户数据目录: {user_data_dir}")
 
         # 反检测参数（降低被识别为自动化的风险）
         co.set_argument('--disable-blink-features=AutomationControlled')
