@@ -51,14 +51,19 @@ class BrowserDriver(ABC):
 
 
 class DrissionPageDriver(BrowserDriver):
-    def __init__(self, headless=False):
+    def __init__(self, headless=False, user_data_dir=None, remote_debugging_port=None):
         co = ChromiumOptions()
         if headless:
             co.headless()
-        # Docker 环境必需参数
         co.set_argument('--no-sandbox')
         co.set_argument('--disable-dev-shm-usage')
-        co.set_argument('--disable-gpu')          # 可选
+        co.set_argument('--disable-gpu')
+        co.set_argument('--disable-blink-features=AutomationControlled')
+        co.set_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+        if user_data_dir:
+            co.set_argument(f'--user-data-dir={user_data_dir}')
+        if remote_debugging_port:
+            co.set_argument(f'--remote-debugging-port={remote_debugging_port}')
         self.page = ChromiumPage(co)
 
     def open(self, url):
@@ -301,9 +306,10 @@ def sign_site(site, ocr_config, retry_times=3):
             logging.warning(f"解析 cookies 失败: {e}")
 
     # 从全局配置读取 headless
+    from debug_worker import USER_DATA_DIR
     from models import get_config
     headless = get_config('headless') == '1'
-    driver = DrissionPageDriver(headless=headless)
+    driver = DrissionPageDriver(headless=headless, user_data_dir=USER_DATA_DIR)
 
     attempt = 0
     success = False
