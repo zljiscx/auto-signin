@@ -342,12 +342,14 @@ def remote_debug_start(sid):
     sign_url = site.get('sign_url')
     if not sign_url:
         return {'success': False, 'message': '该站点没有签到地址'}, 400
-    import threading
-    def _start():
-        start_debug_session(sign_url)
-
-    threading.Thread(target=_start, daemon=True).start()
-    return {'success': True, 'message': '调试浏览器已启动'}
+    try:
+        import threading
+        def _start():
+            start_debug_session(sign_url)
+        threading.Thread(target=_start, daemon=True).start()
+        return {'success': True, 'message': '调试浏览器已启动'}
+    except Exception as e:
+        return {'success': False, 'message': f'启动失败: {str(e)}'}, 500
 
 
 if __name__ == '__main__':
