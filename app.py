@@ -360,7 +360,7 @@ def upload_user_data(sid):
     except Exception as e:
         logging.warning(f"结束 Chromium 进程时出错: {e}")
 
-    # 清空目标目录内容（保留目录本身，因为是挂载点）
+    # 清空目标目录内容（保留目录本身）
     if os.path.exists(target_dir):
         for item in os.listdir(target_dir):
             item_path = os.path.join(target_dir, item)
@@ -374,9 +374,13 @@ def upload_user_data(sid):
     else:
         os.makedirs(target_dir, exist_ok=True)
 
-    # 保存上传的文件
     for file in files:
         rel_path = file.filename
+        parts = rel_path.split('/', 1)
+        if len(parts) > 1:
+            rel_path = parts[1]
+        else:
+            rel_path = parts[0]
         full_path = os.path.join(target_dir, rel_path)
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         file.save(full_path)
