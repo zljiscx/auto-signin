@@ -55,6 +55,10 @@ class DrissionPageDriver(BrowserDriver):
         co = ChromiumOptions()
         if headless:
             co.headless()
+        # Docker 环境必需参数
+        co.set_argument('--no-sandbox')
+        co.set_argument('--disable-dev-shm-usage')
+        co.set_argument('--disable-gpu')          # 可选
         self.page = ChromiumPage(co)
 
     def open(self, url):
