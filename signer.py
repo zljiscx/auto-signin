@@ -1,3 +1,4 @@
+import os
 import json
 import time
 import logging
@@ -6,7 +7,7 @@ from urllib.parse import urlparse
 from DrissionPage import ChromiumPage, ChromiumOptions
 from models import update_site_cookies, update_site_sign_result
 from utils import (
-    ocr_captcha, decrypt_data, encrypt_data,
+    ocr_captcha, decrypt_data, encrypt_data, get_user_data_dir,
     JS_FILL_TEMPLATE, JS_GET_SRC_TEMPLATE, JS_FILL_CAPTCHA_TEMPLATE, JS_CLICK_TEMPLATE,
     DEFAULT_USERNAME_SELECTORS, DEFAULT_PASSWORD_SELECTORS,
     DEFAULT_CAPTCHA_IMG_SELECTORS, DEFAULT_CAPTCHA_INPUT_SELECTORS,
@@ -16,6 +17,15 @@ from utils import (
 logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(name)s:%(message)s')
 
 
+def is_docker():
+    """检测是否在 Docker 容器内运行"""
+    if os.path.exists('/.dockerenv'):
+        return True
+    try:
+        with open('/proc/self/cgroup', 'r') as f:
+            return 'docker' in f.read()
+    except:
+        return False
 
 
 class BrowserDriver(ABC):
@@ -51,19 +61,23 @@ class BrowserDriver(ABC):
 
 
 class DrissionPageDriver(BrowserDriver):
-    def __init__(self, headless=False, user_data_dir=None, remote_debugging_port=None):
+    def __init__(self, headless=False):
         co = ChromiumOptions()
         if headless:
             co.headless()
-        co.set_argument('--no-sandbox')
-        co.set_argument('--disable-dev-shm-usage')
-        co.set_argument('--disable-gpu')
+
+        # 固定窗口大小
+        co.set_argument('--window-size=1200,800')
+
+        user_data_dir = get_user_data_dir()
+        os.makedirs(user_data_dir, exist_ok=True)
+        co.set_argument(f'--user-data-dir={user_data_dir}')
+
+        # 反检测参数（降低被识别为自动化的风险）
         co.set_argument('--disable-blink-features=AutomationControlled')
-        co.set_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-        if user_data_dir:
-            co.set_argument(f'--user-data-dir={user_data_dir}')
-        if remote_debugging_port:
-            co.set_argument(f'--remote-debugging-port={remote_debugging_port}')
+        co.set_argument(
+            '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+
         self.page = ChromiumPage(co)
 
     def open(self, url):
@@ -301,15 +315,15 @@ def sign_site(site, ocr_config, retry_times=3):
                 raw_list = json.loads(decrypted)
                 if isinstance(raw_list, list):
                     allowed = {'name', 'value', 'domain', 'path', 'expires', 'httpOnly', 'secure'}
-                    cookies_list = [{k: v for k, v in c.items() if k in allowed} for c in raw_list if 'name' in c and 'value' in c]
+                    cookies_list = [{k: v for k, v in c.items() if k in allowed} for c in raw_list if
+                                    'name' in c and 'value' in c]
         except Exception as e:
             logging.warning(f"解析 cookies 失败: {e}")
 
     # 从全局配置读取 headless
-    from debug_worker import USER_DATA_DIR
     from models import get_config
     headless = get_config('headless') == '1'
-    driver = DrissionPageDriver(headless=headless, user_data_dir=USER_DATA_DIR)
+    driver = DrissionPageDriver(headless=headless)
 
     attempt = 0
     success = False
@@ -342,7 +356,8 @@ def sign_site(site, ocr_config, retry_times=3):
                 time.sleep(1)
                 new_cookies = driver.get_cookies()
                 allowed = {'name', 'value', 'domain', 'path', 'expires', 'httpOnly', 'secure'}
-                filtered_new = [{k: v for k, v in c.items() if k in allowed} for c in new_cookies if 'name' in c and 'value' in c]
+                filtered_new = [{k: v for k, v in c.items() if k in allowed} for c in new_cookies if
+                                'name' in c and 'value' in c]
                 cookies_json = json.dumps(filtered_new)
                 # 加密保存
                 from utils import encrypt_data
