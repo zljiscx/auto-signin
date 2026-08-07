@@ -4,6 +4,7 @@ FROM python:3.10-slim
 RUN apt-get update && apt-get install -y \
     chromium \
     chromium-driver \
+    socat \
     fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \
