@@ -29,6 +29,7 @@ def scheduled_sign():
     for site in enabled_sites:
         logger.info(f"签到站点: {site['name']}")
         try:
+            # 自动签到，is_manual=False（默认）
             success, msg = sign_site(site, ocr_config, retry_times)
             if success:
                 results.append(f"✅ {site['name']} 签到成功。")
