@@ -1,28 +1,46 @@
-FROM python:3.11-slim
+FROM python:3.10-slim
 
-WORKDIR /app
-
-# 安装系统依赖和 Chrome（直接下载 .deb 包，避免仓库签名问题）
+# 安装 Chromium 和依赖
 RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
-    unzip \
-    curl \
-    xz-utils \
-    && wget -q -O google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
-    && apt-get install -y ./google-chrome.deb || apt-get install -f -y \
-    && rm google-chrome.deb \
+    chromium \
+    chromium-driver \
+    fonts-liberation \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libcups2 \
+    libdbus-1-3 \
+    libdrm2 \
+    libgbm1 \
+    libgtk-3-0 \
+    libnspr4 \
+    libnss3 \
+    libx11-xcb1 \
+    libxcb1 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 Python 依赖
+# 设置工作目录
+WORKDIR /app
+
+# 复制依赖文件并安装
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 复制项目文件
+# 复制项目代码
 COPY . .
 
-RUN mkdir -p /app/data
+# 创建数据目录（权限）
+RUN mkdir -p /app/data && chmod 755 /app/data
 
-EXPOSE 5678
+# 暴露端口
+EXPOSE 56789
 
+# 设置时区
+ENV TZ=Asia/Shanghai
+
+# 启动命令
 CMD ["python", "app.py"]
