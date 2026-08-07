@@ -1,9 +1,10 @@
 import json
 import os
 import logging
+import shutil
 from datetime import datetime
 from urllib.parse import quote, urlparse
-from flask import Flask, flash, render_template, request, redirect, url_for, Response
+from flask import Flask, flash, render_template, request, redirect, url_for, Response, jsonify
 from models import (
     init_db, get_all_sites, get_site, add_site, update_site,
     delete_site, get_config, set_config, get_all_configs
@@ -11,9 +12,8 @@ from models import (
 from scheduler import start_scheduler, stop_scheduler
 from signer import sign_site
 from utils import (
-    parse_cookies_input, encrypt_data, decrypt_data, normalize_cookies
+    parse_cookies_input, encrypt_data, decrypt_data, normalize_cookies, get_user_data_dir
 )
-from debug_worker import start_debug_session, USER_DATA_DIR
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
@@ -23,7 +23,6 @@ init_db()
 
 sign_time = get_config('sign_time') or '05:05'
 start_scheduler(sign_time)
-os.makedirs(USER_DATA_DIR, exist_ok=True)
 
 
 @app.route('/')
@@ -334,22 +333,35 @@ def manual_sign(sid):
     return redirect(url_for('index'))
 
 
-@app.route('/remote_debug_start/<int:sid>')
-def remote_debug_start(sid):
+@app.route('/upload_user_data/<int:sid>', methods=['POST'])
+def upload_user_data(sid):
     site = get_site(sid)
     if not site:
-        return {'success': False, 'message': '站点不存在'}, 404
-    sign_url = site.get('sign_url')
-    if not sign_url:
-        return {'success': False, 'message': '该站点没有签到地址'}, 400
-    try:
-        import threading
-        def _start():
-            start_debug_session(sign_url)
-        threading.Thread(target=_start, daemon=True).start()
-        return {'success': True, 'message': '调试浏览器已启动'}
-    except Exception as e:
-        return {'success': False, 'message': f'启动失败: {str(e)}'}, 500
+        return jsonify({'success': False, 'message': '站点不存在'}), 404
+
+    if 'files' not in request.files:
+        return jsonify({'success': False, 'message': '未选择文件'}), 400
+
+    files = request.files.getlist('files')
+    if not files:
+        return jsonify({'success': False, 'message': '文件列表为空'}), 400
+
+    target_dir = get_user_data_dir()
+
+    # 清空目标目录（重新创建）
+    if os.path.exists(target_dir):
+        shutil.rmtree(target_dir)
+    os.makedirs(target_dir, exist_ok=True)
+
+    # 保存每个文件，保留相对路径
+    for file in files:
+        # 文件名为相对路径（由 webkitRelativePath 提供）
+        relative_path = file.filename
+        full_path = os.path.join(target_dir, relative_path)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        file.save(full_path)
+
+    return jsonify({'success': True, 'message': f'用户数据已上传，共 {len(files)} 个文件。下次签到将使用新数据。'})
 
 
 if __name__ == '__main__':
