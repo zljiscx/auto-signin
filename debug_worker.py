@@ -5,6 +5,7 @@ import os
 import threading
 import socket
 import requests
+import shutil
 from DrissionPage import ChromiumPage, ChromiumOptions
 
 logger = logging.getLogger(__name__)
@@ -34,15 +35,18 @@ def start_debug_session(sign_url):
                 pass
             _socat_proc = None
 
-        os.makedirs(USER_DATA_DIR, exist_ok=True)
-        # 清理锁定文件
-        for f in ['SingletonLock', 'SingletonSocket', 'SingletonCookie']:
-            lock_path = os.path.join(USER_DATA_DIR, f)
-            if os.path.exists(lock_path):
-                os.remove(lock_path)
-                logger.info(f'已删除锁定文件: {lock_path}')
+        # 强制杀掉所有 Chromium 进程
+        os.system('pkill -f chromium || true')
+        time.sleep(2)
 
-        # 启动 Chromium（仅绑定 127.0.0.1）
+        # 删除整个用户数据目录（确保干净）
+        if os.path.exists(USER_DATA_DIR):
+            shutil.rmtree(USER_DATA_DIR, ignore_errors=True)
+        os.makedirs(USER_DATA_DIR, exist_ok=True)
+
+        # 启动 Chromium（不设置 user-data-dir 参数，让 Chromium 自动生成默认目录？）
+        # 为了更干净，可以不指定 --user-data-dir，让 Chromium 使用临时目录。
+        # 我们指定一个临时目录，确保每次新建。
         cmd = [
             '/usr/bin/chromium',
             '--headless',
@@ -88,7 +92,7 @@ def start_debug_session(sign_url):
                 logger.error(f'Chromium 错误日志:\n{f.read()}')
             raise
 
-        # 启动 socat 转发（0.0.0.0:9222 -> 127.0.0.1:9222）
+        # 启动 socat 转发
         socat_cmd = [
             'socat',
             f'TCP-LISTEN:{DEBUG_PORT},fork,reuseaddr',
@@ -98,7 +102,7 @@ def start_debug_session(sign_url):
         _socat_proc = subprocess.Popen(socat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(1)
 
-        # 验证外部端口（0.0.0.0）可访问
+        # 验证外部端口
         try:
             resp = requests.get(f'http://0.0.0.0:{DEBUG_PORT}/json/version', timeout=5)
             if resp.status_code == 200:
@@ -108,13 +112,11 @@ def start_debug_session(sign_url):
         except Exception as e:
             logger.warning(f'外部端口访问失败: {e}')
 
-        # 连接浏览器（使用 ChromiumOptions）
+        # 连接浏览器
         try:
             co = ChromiumOptions()
             co.set_local_port(DEBUG_PORT)
-            co.set_user_data_path(USER_DATA_DIR)
-            co.set_argument('--no-sandbox')
-            co.set_argument('--disable-dev-shm-usage')
+            # 不需要设置用户数据目录，因为我们已经用本地端口连接
             page = ChromiumPage(co)
             _current_page = page
             logger.info(f'调试浏览器已成功连接，访问 {sign_url}')
@@ -142,4 +144,6 @@ def stop_debug_session():
             except:
                 pass
             _socat_proc = None
+        # 再次清理残留进程
+        os.system('pkill -f chromium || true')
         logger.info('调试浏览器已关闭')
