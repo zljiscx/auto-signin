@@ -13,6 +13,7 @@ from signer import sign_site
 from utils import (
     parse_cookies_input, encrypt_data, decrypt_data, normalize_cookies
 )
+from debug_worker import start_debug_session, USER_DATA_DIR
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
@@ -22,6 +23,7 @@ init_db()
 
 sign_time = get_config('sign_time') or '05:05'
 start_scheduler(sign_time)
+os.makedirs(USER_DATA_DIR, exist_ok=True)
 
 
 @app.route('/')
@@ -330,6 +332,22 @@ def manual_sign(sid):
     except Exception as e:
         flash(f'签到过程异常: {str(e)}', 'danger')
     return redirect(url_for('index'))
+
+
+@app.route('/remote_debug_start/<int:sid>')
+def remote_debug_start(sid):
+    site = get_site(sid)
+    if not site:
+        return {'success': False, 'message': '站点不存在'}, 404
+    sign_url = site.get('sign_url')
+    if not sign_url:
+        return {'success': False, 'message': '该站点没有签到地址'}, 400
+    import threading
+    def _start():
+        start_debug_session(sign_url)
+
+    threading.Thread(target=_start, daemon=True).start()
+    return {'success': True, 'message': '调试浏览器已启动'}
 
 
 if __name__ == '__main__':
