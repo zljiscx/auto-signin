@@ -100,6 +100,7 @@ DATA_DIR = os.path.join(BASE_DIR, 'data')
 KEY_FILE = os.path.join(DATA_DIR, 'encryption.key')
 os.makedirs(DATA_DIR, exist_ok=True)
 
+
 def _get_encryption_key():
     if os.path.exists(KEY_FILE):
         with open(KEY_FILE, 'rb') as f:
@@ -110,6 +111,7 @@ def _get_encryption_key():
             f.write(key)
         return key
 
+
 def encrypt_data(data):
     if data is None:
         return None
@@ -118,11 +120,13 @@ def encrypt_data(data):
     f = Fernet(_get_encryption_key())
     return f.encrypt(data).decode()
 
+
 def decrypt_data(encrypted):
     if encrypted is None:
         return None
     f = Fernet(_get_encryption_key())
     return f.decrypt(encrypted.encode()).decode()
+
 
 # ---------- Cookies 解析 ----------
 def parse_cookies_input(raw_text):
@@ -160,6 +164,7 @@ def parse_cookies_input(raw_text):
             raise ValueError("无法解析cookies，请检查格式")
         return json.dumps(cookies, ensure_ascii=False)
 
+
 # ---------- Cookie 标准化 ----------
 def normalize_cookies(cookies_list, default_domain=None):
     """
@@ -186,12 +191,14 @@ def normalize_cookies(cookies_list, default_domain=None):
         normalized.append(cookie)
     return normalized
 
+
 # ---------- 百度 OCR ----------
 def get_access_token(api_key, secret_key):
     url = "https://aip.baidubce.com/oauth/2.0/token"
     params = {"grant_type": "client_credentials", "client_id": api_key, "client_secret": secret_key}
     resp = requests.post(url, params=params)
     return resp.json().get("access_token")
+
 
 def ocr_captcha(img_bytes, api_key, secret_key):
     """识别验证码图片（二进制数据），返回识别出的文本"""
@@ -205,6 +212,7 @@ def ocr_captcha(img_bytes, api_key, secret_key):
     if 'words_result' in result and result['words_result']:
         return result['words_result'][0]['words']
     return None
+
 
 # ---------- 企业微信消息推送 ----------
 def send_wecom_text_message(webhook_key, content):
@@ -240,3 +248,50 @@ def send_wecom_text_message(webhook_key, content):
     except Exception as e:
         logging.error(f"企业微信消息推送异常: {e}")
         return False, f"推送异常: {str(e)}"
+
+
+def is_docker():
+    """检测是否在 Docker 容器内运行（综合多种检测方式）"""
+    if os.environ.get('CONTAINER') == 'docker':
+        logging.info("通过环境变量确定为Docker环境")
+        return True
+
+    if os.path.exists('/.dockerenv'):
+        logging.info("通过.dockerenv确定为Docker环境")
+        return True
+
+    try:
+        with open('/proc/1/cgroup', 'r') as f:
+            content = f.read()
+            if 'docker' in content or 'kubepods' in content:
+                logging.info("通过/proc/1/cgroup确定为Docker环境")
+                return True
+    except:
+        pass
+
+    try:
+        with open('/proc/self/cgroup', 'r') as f:
+            content = f.read()
+            if 'docker' in content or 'kubepods' in content:
+                logging.info("通过/proc/self/cgroup确定为Docker环境")
+                return True
+    except:
+        pass
+
+    try:
+        with open('/proc/self/mountinfo', 'r') as f:
+            if 'docker' in f.read():
+                logging.info("通过/proc/self/mountinfo确定为Docker环境")
+                return True
+    except:
+        pass
+
+    return False
+
+
+def get_user_data_dir():
+    """根据环境返回用户数据目录路径"""
+    if is_docker():
+        return '/app/chrome_data'
+    else:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'chrome_data')
