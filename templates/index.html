@@ -52,6 +52,11 @@
                             <a href="{{ url_for('manual_sign', sid=site.id) }}" class="btn btn-outline-success" title="手动签到">
                                 <i class="fas fa-play"></i>
                             </a>
+                            {% if site.has_cloudflare %}
+                            <button class="btn btn-outline-warning remote-debug-btn" data-sid="{{ site.id }}" title="远程验证（Cloudflare）">
+                                <i class="fas fa-link"></i>
+                            </button>
+                            {% endif %}
                             <a href="{{ url_for('delete', sid=site.id) }}" class="btn btn-outline-danger" title="删除" onclick="return confirm('确定删除站点「{{ site.name }}」吗？')">
                                 <i class="fas fa-trash-alt"></i>
                             </a>
@@ -68,4 +73,34 @@
         </div>
     </div>
 </div>
+{% endblock %}
+{% block extra_js %}
+{{ super() }}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('.remote-debug-btn').forEach(function(btn) {
+        btn.addEventListener('click', function(e) {
+            e.preventDefault();
+            var sid = this.getAttribute('data-sid');
+            var url = '/remote_debug_start/' + sid;
+            // 先请求后端启动调试浏览器
+            fetch(url)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        // 自动打开远程调试页面
+                        var host = window.location.hostname;
+                        var debugUrl = 'http://' + host + ':9222';
+                        window.open(debugUrl, '_blank');
+                    } else {
+                        alert('启动调试失败: ' + data.message);
+                    }
+                })
+                .catch(err => {
+                    alert('请求失败: ' + err);
+                });
+        });
+    });
+});
+</script>
 {% endblock %}
