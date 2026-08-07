@@ -1,4 +1,3 @@
-# debug_worker.py
 import subprocess
 import time
 import logging
@@ -6,7 +5,7 @@ import os
 import threading
 import socket
 import requests
-from DrissionPage import ChromiumPage
+from DrissionPage import ChromiumPage, ChromiumOptions
 
 logger = logging.getLogger(__name__)
 
@@ -27,18 +26,18 @@ def start_debug_session(sign_url):
                 pass
             _current_page = None
 
-        # 清理锁定文件
         os.makedirs(USER_DATA_DIR, exist_ok=True)
+        # 清理锁定文件
         for f in ['SingletonLock', 'SingletonSocket', 'SingletonCookie']:
             lock_path = os.path.join(USER_DATA_DIR, f)
             if os.path.exists(lock_path):
                 os.remove(lock_path)
                 logger.info(f'已删除锁定文件: {lock_path}')
 
-        # 启动 Chromium（去掉可能导致问题的参数）
+        # 启动 Chromium
         cmd = [
             '/usr/bin/chromium',
-            '--headless',                # 使用旧模式，更稳定
+            '--headless',
             f'--remote-debugging-port={DEBUG_PORT}',
             '--no-sandbox',
             '--disable-dev-shm-usage',
@@ -49,7 +48,7 @@ def start_debug_session(sign_url):
         with open('/tmp/chromium.log', 'w') as f:
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=f)
 
-        # 等待端口开放（最多 30 秒）
+        # 等待端口开放
         port_ready = False
         for i in range(30):
             time.sleep(1)
@@ -71,7 +70,7 @@ def start_debug_session(sign_url):
             resp = requests.get(f'http://127.0.0.1:{DEBUG_PORT}/json/version', timeout=5)
             if resp.status_code == 200:
                 logger.info('调试接口可用')
-                logger.debug(resp.json())
+                logger.info(f'/json/version 响应: {resp.json()}')
             else:
                 logger.error(f'调试接口返回状态码 {resp.status_code}')
                 raise RuntimeError('调试接口不可用')
@@ -81,11 +80,16 @@ def start_debug_session(sign_url):
                 logger.error(f'Chromium 错误日志:\n{f.read()}')
             raise
 
-        # 连接浏览器
+        # 连接浏览器（使用 ChromiumOptions 明确指定端口）
         try:
-            page = ChromiumPage(addr_or_opts=f'127.0.0.1:{DEBUG_PORT}')
+            co = ChromiumOptions()
+            co.set_local_port(DEBUG_PORT)
+            co.set_user_data_path(USER_DATA_DIR)   # 可选
+            co.set_argument('--no-sandbox')
+            co.set_argument('--disable-dev-shm-usage')
+            page = ChromiumPage(co)
             _current_page = page
-            logger.info(f'调试浏览器已启动，访问 {sign_url}')
+            logger.info(f'调试浏览器已成功连接，访问 {sign_url}')
             def keep_alive():
                 while True:
                     time.sleep(10)
