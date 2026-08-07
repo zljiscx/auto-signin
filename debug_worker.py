@@ -1,9 +1,9 @@
-# debug_worker.py
-import threading
+import subprocess
 import time
 import logging
 import os
-from DrissionPage import ChromiumPage, ChromiumOptions
+import threading
+from DrissionPage import ChromiumPage
 
 logger = logging.getLogger(__name__)
 
@@ -16,45 +16,44 @@ _lock = threading.Lock()
 def start_debug_session(sign_url):
     global _current_page
     with _lock:
-        # 关闭已有调试进程
+        # 关闭旧的调试进程
         if _current_page:
             try:
                 _current_page.close()
-            except Exception as e:
-                logger.error(f"关闭旧调试浏览器失败: {e}")
+            except:
+                pass
             _current_page = None
 
         os.makedirs(USER_DATA_DIR, exist_ok=True)
 
+        # 构建启动命令（确保监听 0.0.0.0）
+        cmd = [
+            '/usr/bin/chromium',
+            '--headless',
+            f'--remote-debugging-port={DEBUG_PORT}',
+            '--remote-debugging-address=0.0.0.0',
+            '--no-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            f'--user-data-dir={USER_DATA_DIR}',
+            sign_url
+        ]
+        logger.info('启动调试浏览器: ' + ' '.join(cmd))
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(5)  # 等待浏览器启动
+
+        # 连接已启动的浏览器（内部访问 127.0.0.1）
         try:
-            co = ChromiumOptions()
-            # 基础反检测参数
-            co.set_argument('--no-sandbox')
-            co.set_argument('--disable-dev-shm-usage')
-            co.set_argument('--disable-blink-features=AutomationControlled')
-            co.set_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-            # 用户数据目录
-            co.set_argument(f'--user-data-dir={USER_DATA_DIR}')
-            # 远程调试：端口 + 绑定所有地址（关键！）
-            co.set_argument(f'--remote-debugging-port={DEBUG_PORT}')
-            co.set_argument('--remote-debugging-address=0.0.0.0')
-            # 启用新无头模式（支持远程调试）
-            co.set_argument('--headless=new')
-            co.set_argument('--disable-gpu')
-            co.set_argument('--window-size=1200,800')
-
-            logger.info(f"启动调试浏览器，访问 {sign_url}")
-            page = ChromiumPage(co)
-            page.get(sign_url)
-            logger.info(f"调试浏览器已启动，远程调试地址: http://0.0.0.0:{DEBUG_PORT}")
+            page = ChromiumPage(addr_or_opts=f'127.0.0.1:{DEBUG_PORT}')
             _current_page = page
-
+            logger.info(f'调试浏览器已启动，访问 {sign_url}')
+            # 守护线程保持进程
             def keep_alive():
                 while True:
                     time.sleep(10)
             threading.Thread(target=keep_alive, daemon=True).start()
         except Exception as e:
-            logger.error(f"启动调试浏览器失败: {e}")
+            logger.error(f'连接调试浏览器失败: {e}')
             raise
 
 def stop_debug_session():
@@ -66,4 +65,4 @@ def stop_debug_session():
             except:
                 pass
             _current_page = None
-            logger.info("调试浏览器已关闭")
+            logger.info('调试浏览器已关闭')
