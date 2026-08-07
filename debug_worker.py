@@ -13,10 +13,11 @@ USER_DATA_DIR = '/app/chrome_data'
 DEBUG_PORT = 9222
 
 _current_page = None
+_socat_proc = None
 _lock = threading.Lock()
 
 def start_debug_session(sign_url):
-    global _current_page
+    global _current_page, _socat_proc
     with _lock:
         # 清理旧进程
         if _current_page:
@@ -25,6 +26,13 @@ def start_debug_session(sign_url):
             except:
                 pass
             _current_page = None
+        if _socat_proc:
+            try:
+                _socat_proc.terminate()
+                _socat_proc.wait(timeout=2)
+            except:
+                pass
+            _socat_proc = None
 
         os.makedirs(USER_DATA_DIR, exist_ok=True)
         # 清理锁定文件
@@ -34,7 +42,7 @@ def start_debug_session(sign_url):
                 os.remove(lock_path)
                 logger.info(f'已删除锁定文件: {lock_path}')
 
-        # 启动 Chromium
+        # 启动 Chromium（仅绑定 127.0.0.1）
         cmd = [
             '/usr/bin/chromium',
             '--headless',
@@ -80,11 +88,31 @@ def start_debug_session(sign_url):
                 logger.error(f'Chromium 错误日志:\n{f.read()}')
             raise
 
-        # 连接浏览器（使用 ChromiumOptions 明确指定端口）
+        # 启动 socat 转发（0.0.0.0:9222 -> 127.0.0.1:9222）
+        socat_cmd = [
+            'socat',
+            f'TCP-LISTEN:{DEBUG_PORT},fork,reuseaddr',
+            f'TCP:127.0.0.1:{DEBUG_PORT}'
+        ]
+        logger.info('启动 socat 转发: ' + ' '.join(socat_cmd))
+        _socat_proc = subprocess.Popen(socat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1)
+
+        # 验证外部端口（0.0.0.0）可访问
+        try:
+            resp = requests.get(f'http://0.0.0.0:{DEBUG_PORT}/json/version', timeout=5)
+            if resp.status_code == 200:
+                logger.info('外部端口 0.0.0.0:9222 可访问')
+            else:
+                logger.warning('外部端口访问状态码异常')
+        except Exception as e:
+            logger.warning(f'外部端口访问失败: {e}')
+
+        # 连接浏览器（使用 ChromiumOptions）
         try:
             co = ChromiumOptions()
             co.set_local_port(DEBUG_PORT)
-            co.set_user_data_path(USER_DATA_DIR)   # 可选
+            co.set_user_data_path(USER_DATA_DIR)
             co.set_argument('--no-sandbox')
             co.set_argument('--disable-dev-shm-usage')
             page = ChromiumPage(co)
@@ -99,7 +127,7 @@ def start_debug_session(sign_url):
             raise
 
 def stop_debug_session():
-    global _current_page
+    global _current_page, _socat_proc
     with _lock:
         if _current_page:
             try:
@@ -107,4 +135,11 @@ def stop_debug_session():
             except:
                 pass
             _current_page = None
-            logger.info('调试浏览器已关闭')
+        if _socat_proc:
+            try:
+                _socat_proc.terminate()
+                _socat_proc.wait(timeout=2)
+            except:
+                pass
+            _socat_proc = None
+        logger.info('调试浏览器已关闭')
