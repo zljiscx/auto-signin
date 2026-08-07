@@ -35,6 +35,7 @@ COPY . .
 
 # 创建数据目录（权限）
 RUN mkdir -p /app/data && chmod 755 /app/data
+RUN mkdir -p /app/chrome_data && chmod 755 /app/chrome_data
 
 # 暴露端口
 EXPOSE 56789
