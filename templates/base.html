@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}自动签到系统{% endblock %}</title>
+    <!-- 浏览器标签ICO图标 -->
+    <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
+    <link rel="shortcut icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
+    <!-- 本地 Font Awesome 图标库 -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/all.min.css') }}">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: "Microsoft Yahei", Tahoma, Arial, sans-serif;
+            background: #f0f2f5;
+            color: #333;
+            font-size: 15px;
+        }
+        .container { max-width: 1150px; margin: 0 auto; padding: 20px; }
+
+        /* 导航栏 */
+        .nav {
+            background: #fff;
+            border-bottom: 1px solid #e4e7ed;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            height: 70px;
+            padding: 0 24px;
+            border-radius: 8px;
+        }
+        .nav a {
+            color: #606266;
+            text-decoration: none;
+            padding: 0 20px;
+            line-height: 70px;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px; /* 图标与文字间距 */
+            font-size: 24px;
+            transition: all .2s;
+            border-bottom: 2px solid transparent;
+        }
+        .nav a:hover {
+            color: #409eff;
+        }
+        .nav a.active {
+            color: #409eff;
+            font-weight: 600;
+            border-bottom-color: #409eff;
+        }
+        .nav .right { margin-left: auto; }
+        .nav .logout-icon {
+            font-size: 24px;
+            line-height: 70px;
+            padding: 0 12px;
+            color: #606266;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .nav .logout-icon:hover {
+            color: #f56c6c;
+        }
+
+        /* 卡片 */
+        .card {
+            background: #fff;
+            border: 1px solid #ebeef5;
+            border-radius: 10px;
+            padding: 22px;
+            margin-bottom: 20px;
+        }
+        .card h3 {
+            margin-bottom: 20px;
+            font-size: 17px;
+            font-weight: 600;
+            color: #303133;
+        }
+
+        /* 基础按钮 */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 5px;
+            padding: 0 16px;
+            height: 36px;
+            border: 1px solid #dcdfe6;
+            border-radius: 4px;
+            cursor: pointer;
+            text-decoration: none;
+            font-size: 16px;
+            font-weight: bold;
+            background: #fff;
+            color: #606266;
+            line-height: 1;
+            transition: all .2s;
+        }
+        .btn:hover { color: #409eff; border-color: #c6e2ff; background: #ecf5ff; }
+        .btn-primary { background: #409eff; border-color: #409eff; color: #fff; }
+        .btn-primary:hover { background: #66b1ff; border-color: #66b1ff; color: #fff; }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        /* 按钮组 */
+        .btn-group {
+            display: inline-flex;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .btn-group .btn {
+            border-radius: 0;
+            margin: 0;
+            border-right: none;
+        }
+        .btn-group .btn:first-child {
+            border-radius: 4px 0 0 4px;
+        }
+        .btn-group .btn:last-child {
+            border-radius: 0 4px 4px 0;
+            border-right: 1px solid;
+        }
+        .btn-sm {
+            height: 30px;
+            padding: 0 11px;
+            font-size: 13px;
+            font-weight: normal;
+        }
+
+        /* 轮廓按钮 */
+        .btn-outline-primary {
+            color: #409eff;
+            border-color: #409eff;
+            background: #fff;
+        }
+        .btn-outline-primary:hover {
+            background: #409eff;
+            color: #fff;
+        }
+        .btn-outline-success {
+            color: #67c23a;
+            border-color: #67c23a;
+            background: #fff;
+        }
+        .btn-outline-success:hover {
+            background: #67c23a;
+            color: #fff;
+        }
+        .btn-outline-danger {
+            color: #f56c6c;
+            border-color: #f56c6c;
+            background: #fff;
+        }
+        .btn-outline-danger:hover {
+            background: #f56c6c;
+            color: #fff;
+        }
+
+        /* 表格 */
+        table { width: 100%; border-collapse: collapse; border: 1px solid #ebeef5; font-size: 15px; }
+        th, td { padding: 12px 14px; text-align: left; border-bottom: 1px solid #ebeef5; }
+        th { background: #fafafa; font-weight: 500; color: #909399; font-size: 14px; }
+        tr:hover { background: #fafafa; }
+        .td-nowrap { white-space: nowrap; }
+
+        /* 表单 - 全局统一高度 */
+        .form-group { margin-bottom: 18px; }
+        .form-group label {
+            display: block;
+            margin-bottom: 7px;
+            color: #606266;
+            font-size: 15px;
+            line-height: 1.5;
+        }
+        .form-group input[type="text"],
+        .form-group input[type="url"],
+        .form-group input[type="password"],
+        .form-group input[type="number"],
+        .form-group input[type="time"] {
+            width: 100%;
+            height: 36px;
+            padding: 0 12px;
+            border: 1px solid #dcdfe6;
+            border-radius: 4px;
+            font-size: 15px;
+            color: #606266;
+            line-height: 36px;
+            font-family: inherit;
+        }
+        .form-group textarea {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #dcdfe6;
+            border-radius: 4px;
+            font-size: 15px;
+            color: #606266;
+            line-height: 1.5;
+            font-family: inherit;
+            resize: vertical;
+        }
+        .form-group input:focus, .form-group textarea:focus {
+            outline: none;
+            border-color: #409eff;
+        }
+        .form-row { display: flex; gap: 18px; }
+        .form-row .form-group { flex: 1; }
+        .form-tip {
+            font-size: 13px;
+            margin-top: 5px;
+            font-weight: normal;
+        }
+        .status-ok { color: #67c23a; }
+        .status-no { color: #909399; }
+
+        /* ========== 全局通用开关组件（所有页面统一复用） ========== */
+        .form-switch {
+            display: flex;
+            align-items: center;
+            height: 36px;
+            margin-bottom: 18px;
+        }
+        .form-switch .switch {
+            position: relative;
+            display: inline-block;
+            width: 44px;
+            height: 22px;
+            flex-shrink: 0;
+        }
+        .form-switch .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .form-switch .switch-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: #dcdfe6;
+            border-radius: 22px;
+            transition: .3s;
+        }
+        .form-switch .switch-slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 2px;
+            bottom: 2px;
+            background: #fff;
+            border-radius: 50%;
+            transition: .3s;
+        }
+        .form-switch .switch input:checked + .switch-slider {
+            background: #409eff;
+        }
+        .form-switch .switch input:checked + .switch-slider:before {
+            transform: translateX(22px);
+        }
+        .form-switch .switch-text {
+            margin-left: 10px;
+            color: #606266;
+            font-size: 15px;
+            line-height: 22px;
+        }
+
+        /* 单按钮导入/上传 */
+        .import-btn { position: relative; display: inline-block; }
+        .import-btn input[type="file"] {
+            position: absolute;
+            left: 0;
+            top: 0;
+            opacity: 0;
+            width: 100%;
+            height: 100%;
+            cursor: pointer;
+        }
+
+        /* 消息提示 */
+        .flash { padding: 11px 15px; border-radius: 4px; margin-bottom: 15px; border: 1px solid; font-size: 15px; }
+        .flash.success { background: #f0f9eb; border-color: #e1f3d8; color: #67c23a; }
+        .flash.danger { background: #fef0f0; border-color: #fde2e2; color: #f56c6c; }
+        .flash.warning { background: #fdf6ec; border-color: #faecd8; color: #e6a23c; }
+
+        .success-text { color: #67c23a; }
+        .danger-text { color: #f56c6c; }
+        .inline-form { display: inline; }
+        details { margin: 18px 0; border: 1px solid #ebeef5; border-radius: 4px; padding: 12px 14px; background: #fafafa; }
+        summary { cursor: pointer; color: #409eff; outline: none; font-size: 15px; }
+
+        /* 链接图标 */
+        .link-icon {
+            text-decoration: none;
+            display: inline-block;
+        }
+        .link-icon i {
+            font-size: 16px;
+            color: #409eff;
+        }
+        .link-icon:hover i {
+            color: #66b1ff;
+        }
+
+        .required { color: #f56c6c; margin-left: 3px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        {% if session.logged_in %}
+        <div class="nav">
+            <a href="{{ url_for('index') }}" class="{{ 'active' if request.endpoint == 'index' else '' }}">
+                <i class="fas fa-list"></i>站点列表
+            </a>
+            <a href="{{ url_for('add') }}" class="{{ 'active' if request.endpoint == 'add' else '' }}">
+                <i class="fas fa-plus-circle"></i>添加站点
+            </a>
+            <a href="{{ url_for('settings') }}" class="{{ 'active' if request.endpoint == 'settings' else '' }}">
+                <i class="fas fa-cog"></i>系统设置
+            </a>
+            <a href="{{ url_for('logs') }}" class="{{ 'active' if request.endpoint == 'logs' else '' }}">
+                <i class="fas fa-clipboard-list"></i>签到日志
+            </a>
+            <div class="right">
+                <a href="{{ url_for('logout') }}" class="logout-icon" title="退出登录">
+                    <i class="fas fa-power-off"></i>退出
+                </a>
+            </div>
+        </div>
+        {% endif %}
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        {% block content %}{% endblock %}
+    </div>
+</body>
+</html>

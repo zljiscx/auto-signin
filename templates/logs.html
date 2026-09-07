@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}签到日志{% endblock %}
+{% block content %}
+<div class="card">
+    <h2 style="margin-bottom: 20px;">最近签到日志</h2>
+    <!-- 表格滚动容器：固定最大高度，超出纵向滚动 -->
+    <div style="max-height: 650px; overflow-y: auto;">
+        <table>
+            <thead>
+                <tr>
+                    <th style="font-weight: bold; font-size: 16px;">时间</th>
+                    <th style="font-weight: bold; font-size: 16px;">站点</th>
+                    <th style="font-weight: bold; font-size: 16px;">类型</th>
+                    <th style="font-weight: bold; font-size: 16px;">结果</th>
+                    <th style="font-weight: bold; font-size: 16px;">耗时</th>
+                    <th style="font-weight: bold; font-size: 16px;">详情</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for log in logs %}
+                <tr>
+                    <td>{{ log.sign_time }}</td>
+                    <td>{{ log.site_name }}</td>
+                    <td>{{ '手动' if log.is_manual else '定时' }}</td>
+                    <td>
+                        {% if log.success %}<span class="success-text">成功</span>
+                        {% else %}<span class="danger-text">失败</span>{% endif %}
+                    </td>
+                    <td>{{ log.duration }}秒</td>
+                    <td style="max-width: 400px;">{{ log.message }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="6" style="text-align: center; color: #999;">暂无日志</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}登录 - 自动签到系统{% endblock %}
+{% block content %}
+<div class="card" style="max-width: 400px; margin: 100px auto;">
+    <h2 style="text-align: center; margin-bottom: 20px;">自动签到系统</h2>
+    <form method="post">
+        <div class="form-group">
+            <label>管理员密码</label>
+            <input type="password" name="password" required placeholder="请输入管理员密码">
+        </div>
+        <button type="submit" class="btn btn-primary" style="width: 100%;">登录</button>
+    </form>
+</div>
+{% endblock %}

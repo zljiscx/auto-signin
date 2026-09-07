@@ -1,0 +1,11 @@
+Flask==2.3.3
+# Flask 的紧邻依赖，锁定已实测版本，防止未来大版本破坏兼容
+Werkzeug==3.1.8
+APScheduler==3.10.4
+requests==2.31.0
+DrissionPage==4.0.4
+# DrissionPage 4.0.4 依赖 psutil 的 connections 属性，psutil 6+ 已移除，会导致浏览器进程无法关闭
+psutil==5.9.8
+cryptography==42.0.7
+python-dotenv==1.0.0
+gunicorn==21.2.0

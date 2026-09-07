@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}站点列表{% endblock %}
+{% block content %}
+<div class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px;">
+        <h2 style="margin: 0;">站点管理</h2>
+        <div style="display: flex; gap: 12px; align-items: center;">
+            <form method="post" action="{{ url_for('export') }}" class="inline-form">
+                <button type="submit" class="btn"><i class="fas fa-download"></i> 导出</button>
+            </form>
+
+            <form method="post" action="{{ url_for('import_data') }}" enctype="multipart/form-data" class="inline-form">
+                <div class="import-btn">
+                    <button type="button" class="btn"><i class="fas fa-upload"></i> 导入</button>
+                    <input type="file" name="file" accept=".json" onchange="this.form.submit()">
+                </div>
+            </form>
+
+            <a href="{{ url_for('add') }}" class="btn btn-primary"><i class="fas fa-plus-circle"></i> 添加</a>
+        </div>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th style="font-weight: bold; font-size: 16px;">站点名称</th>
+                <th style="font-weight: bold; font-size: 16px;">签到模式</th>
+                <th style="font-weight: bold; font-size: 16px;">登录地址</th>
+                <th style="font-weight: bold; font-size: 16px;">签到地址</th>
+                <th style="font-weight: bold; font-size: 16px;">状态</th>
+                <th style="font-weight: bold; font-size: 16px;">上次签到</th>
+                <th width="140px" class="td-nowrap" style="font-weight: bold; font-size: 16px;">操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for site in sites %}
+            <tr>
+                <td>{{ site.name }}</td>
+                <td>
+                    {% if site.mode == 'api' %}
+                    <span style="color:#409eff;"><i class="fas fa-bolt"></i> {{ site.mode_label }}</span>
+                    {% else %}
+                    <span style="color:#909399;"><i class="fas fa-globe"></i> {{ site.mode_label }}</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if site.login_url %}
+                    <a href="{{ site.login_url }}" target="_blank" class="link-icon" title="{{ site.login_url }}">
+                        <i class="fas fa-external-link-alt"></i>
+                    </a>
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+                <td>
+                    <a href="{{ site.sign_url }}" target="_blank" class="link-icon" title="{{ site.sign_url }}">
+                        <i class="fas fa-external-link-alt"></i>
+                    </a>
+                </td>
+                <td>
+                    {% if site.enabled %}
+                        {% if site.sign_success %}<span class="success-text">正常</span>
+                        {% else %}<span class="danger-text">异常</span>{% endif %}
+                    {% else %}<span style="color:#909399;">已禁用</span>{% endif %}
+                </td>
+                <td>{{ site.last_sign_time or '从未签到' }}</td>
+                <td class="td-nowrap">
+                    <div class="btn-group btn-group-sm" role="group">
+                        <form method="post" action="{{ url_for('manual_sign', sid=site.id) }}" class="inline-form">
+                            <button type="submit" class="btn btn-outline-success" title="手动签到" {% if not site.enabled %}disabled{% endif %}>
+                                <i class="fas fa-play"></i>
+                            </button>
+                        </form>
+                        <a href="{{ url_for('edit', sid=site.id) }}" class="btn btn-outline-primary" title="编辑">
+                            <i class="fas fa-edit"></i>
+                        </a>
+                        <form method="post" action="{{ url_for('delete', sid=site.id) }}" class="inline-form" onsubmit="return confirm('确定删除站点「{{ site.name }}」吗？');">
+                            <button type="submit" class="btn btn-outline-danger" title="删除">
+                                <i class="fas fa-trash-alt"></i>
+                            </button>
+                        </form>
+                    </div>
+                </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="7" style="text-align: center; color: #909399; padding: 40px 0;">暂无站点</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

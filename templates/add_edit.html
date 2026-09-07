@@ -1,0 +1,666 @@
+{% extends "base.html" %}
+{% block title %}{% if site %}编辑{% else %}添加{% endif %}站点{% endblock %}
+{% block content %}
+<div class="card">
+    <h2 style="margin-bottom: 20px;">{% if site %}编辑站点{% else %}添加站点{% endif %}</h2>
+    <form method="post" id="siteForm">
+        <style>
+            .form-item-row { display: flex; align-items: center; gap: 10px; }
+            .form-item-row label {
+                width: 95px; flex-shrink: 0; text-align: justify; text-align-last: justify;
+                margin-bottom: 0 !important; font-weight: bold; font-size: 16px;
+            }
+            .form-item-row input { flex: 1; }
+            select.form-control {
+                width: 100%; height: 36px; padding: 0 12px; border: 1px solid #dcdfe6;
+                border-radius: 4px; font-size: 15px; color: #606266; background: #fff;
+                font-family: inherit;
+            }
+            select.form-control:focus { outline: none; border-color: #409eff; }
+            .mode-tip {
+                font-size: 13px; color: #909399; margin-top: 6px; font-weight: normal; line-height: 1.6;
+            }
+            .section-title {
+                font-size: 15px; font-weight: bold; color: #409eff; margin: 4px 0 14px;
+                padding-left: 8px; border-left: 3px solid #409eff;
+            }
+            .api-box { border: 1px solid #ebeef5; border-radius: 6px; padding: 16px; background: #fafafa; }
+        </style>
+
+        <!-- 第一行：站点名称 + 启用开关 -->
+        <div class="form-row" style="align-items: flex-end;">
+            <div class="form-group">
+                <div class="form-item-row">
+                    <label>站点名称：<span class="required">*</span></label>
+                    <input type="text" name="name" value="{{ site.name if site else '' }}" required>
+                </div>
+            </div>
+            <div style="flex: 1; display: flex; gap: 16px; align-items: center; height: 36px; margin-bottom: 18px;">
+                <div class="form-switch" style="margin-bottom: 0;">
+                    <label class="switch">
+                        <input type="checkbox" name="enabled" {% if not site or site.enabled %}checked{% endif %}>
+                        <span class="switch-slider"></span>
+                    </label>
+                    <span style="font-weight: bold;" class="switch-text">启用</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 第二行：签到模式 -->
+        <div class="form-group">
+            <label style="display: block; margin-bottom: 7px; font-weight: bold;">
+                签到模式：<span class="required">*</span>
+                <span style="color: #909399; font-weight: normal;">（决定用哪种方式完成签到）</span>
+            </label>
+            <select name="mode" id="modeSelect" class="form-control" onchange="switchMode()">
+                {% for m, label, desc in executors %}
+                <option value="{{ m }}" data-desc="{{ desc }}" {% if v.mode == m %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+            </select>
+            <div class="mode-tip" id="modeTip"></div>
+        </div>
+
+        <!-- 第三行：登录地址 | 签到地址（两种模式共用） -->
+        <div class="form-row">
+            <div class="form-group">
+                <div class="form-item-row">
+                    <label>登录地址：</label>
+                    <input type="url" name="login_url" id="loginUrl" value="{{ site.login_url if site else '' }}">
+                </div>
+                <div class="form-tip">账号密码登录时必填；API模式开启「浏览器刷新Cookie」时也要填</div>
+            </div>
+            <div class="form-group">
+                <div class="form-item-row">
+                    <label>签到地址：<span class="required">*</span></label>
+                    <input type="url" name="sign_url" id="signUrl" value="{{ site.sign_url if site else '' }}">
+                </div>
+                <div class="form-tip">API模式可留空，保存时自动从接口地址推导</div>
+            </div>
+        </div>
+
+        <!-- ============ 浏览器模式字段 ============ -->
+        <div id="secBrowser">
+            <div class="section-title">网页信息（浏览器模式）</div>
+            <div class="form-row">
+                <div class="form-group">
+                    <div class="form-item-row">
+                        <label>用户名：</label>
+                        <input type="text" name="username" value="{{ site.username if site else '' }}">
+                    </div>
+                    <div class="form-tip">仅Cookie登录可留空</div>
+                </div>
+                <div class="form-group">
+                    <div class="form-item-row">
+                        <label>密码：</label>
+                        {% set placeholder_text = "不修改请留空；输入-清除密码；纯Cookie登录直接留空" if site else "纯Cookie登录可留空" %}
+                        <input type="password" name="password" placeholder="{{ placeholder_text }}">
+                    </div>
+                </div>
+            </div>
+
+            <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
+                <div class="form-switch" style="margin-bottom: 0;">
+                    <label class="switch">
+                        <input type="checkbox" name="login_first" {% if site and site.login_first %}checked{% endif %}>
+                        <span class="switch-slider"></span>
+                    </label>
+                    <span style="font-weight: bold;" class="switch-text">登录优先</span>
+                </div>
+                <div class="form-switch" style="margin-bottom: 0;">
+                    <label class="switch">
+                        <input type="checkbox" name="has_captcha" {% if site and site.has_captcha %}checked{% endif %}>
+                        <span class="switch-slider"></span>
+                    </label>
+                    <span style="font-weight: bold;" class="switch-text">验证码</span>
+                </div>
+                <div class="form-switch" style="margin-bottom: 0;">
+                    <label class="switch">
+                        <input type="checkbox" name="has_cloudflare" {% if site and site.has_cloudflare %}checked{% endif %}>
+                        <span class="switch-slider"></span>
+                    </label>
+                    <span style="font-weight: bold;" class="switch-text">CF验证</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============ API模式字段 ============ -->
+        <div id="secApi" style="display: none;">
+            <div class="section-title">接口信息（API模式）</div>
+
+            <div class="form-group">
+                <label style="display: block; margin-bottom: 7px; font-weight: bold;">
+                    快速配置：<span style="color:#909399; font-weight: normal;">（任选一种方式，都能自动填好接口信息）</span>
+                </label>
+                <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="toggleCurl()">
+                        <i class="fas fa-paste"></i> cURL 导入
+                    </button>
+                    <div class="import-btn">
+                        <button type="button" class="btn btn-sm btn-outline-primary">
+                            <i class="fas fa-file-code"></i> HAR 文件导入
+                        </button>
+                        <input type="file" name="har_file" accept=".har,.json" onchange="uploadHar(this)">
+                    </div>
+                    <label style="display: inline-flex; align-items: center; gap: 5px; font-weight: normal; font-size: 14px; color: #606266;">
+                        <input type="checkbox" id="harIncludeAll"> 包含全部请求
+                    </label>
+                    <button type="button" class="btn btn-sm btn-outline-primary"
+                            onclick="{% if site %}startSniff(){% else %}saveThenSniff(){% endif %}">
+                        <i class="fas fa-crosshairs"></i> 浏览器自动嗅探
+                    </button>
+                </div>
+
+                <details style="margin: 10px 0 0;">
+                    <summary style="font-size: 14px;">HAR 文件怎么导出？（点开看详细步骤）</summary>
+                    <div style="font-size: 14px; line-height: 1.9; color: #606266; padding: 10px 4px;">
+                        <div style="font-weight: bold; color: #303133;">通用步骤（Chrome / Edge / 360 等 Chromium 浏览器）：</div>
+                        1. 用浏览器登录站点，按 <b>F12</b> 打开开发者工具，切到 <b>Network（网络）</b> 面板<br>
+                        2. <b style="color:#f56c6c;">勾选「Preserve log / 保留日志」★最关键</b>，否则页面跳转时记录会被清空<br>
+                        3. 点面板左上角的 🚫 <b>清空</b> 按钮，清掉已有记录<br>
+                        4. 在页面上 <b>手动完整执行一次签到</b>（直到出现「签到成功」提示）<br>
+                        5. 回到 Network 面板，在请求列表空白处 <b>右键 → Save all as HAR with content</b><br>
+                        6. 用上面的「HAR 文件导入」按钮上传该文件
+                        <div style="margin-top: 10px; font-weight: bold; color: #303133;">常见抓不到数据的原因：</div>
+                        · <b>没勾「保留日志」</b>：签到若发生页面跳转，请求记录会被清空（最常见原因）<br>
+                        · <b>没真正执行签到</b>：只是打开了页面，没有点签到按钮<br>
+                        · <b>导出时没带内容</b>：要选 <b>with content</b>，否则看不到响应内容<br>
+                        · <b>签到是表单提交</b>：Discuz 类站点常见，它是一条 document 类型的 POST，同样能抓到，不是 XHR 也能用
+                    </div>
+                </details>
+
+                <div id="curlBox" style="display: none; margin-top: 10px;">
+                    <textarea id="curlInput" rows="4" placeholder="在浏览器F12里右键签到请求 → 复制 → 复制为cURL，粘贴到此处"></textarea>
+                    <div style="margin-top: 8px; display: flex; gap: 10px;">
+                        <button type="button" class="btn btn-primary btn-sm" onclick="importCurl()">
+                            <i class="fas fa-magic"></i> 解析并填充
+                        </button>
+                        <button type="button" class="btn btn-sm" onclick="toggleCurl()">收起</button>
+                    </div>
+                </div>
+
+                <div id="candidateBox" style="display: none; margin-top: 10px;">
+                    <div style="font-weight: bold; margin-bottom: 8px;">
+                        请选择签到接口：<span id="candMsg" style="font-weight: normal; color: #909399;"></span>
+                    </div>
+                    <div id="candList"></div>
+                    <div style="margin-top: 6px;">
+                        <button type="button" class="btn btn-sm" onclick="document.getElementById('candidateBox').style.display='none'">关闭</button>
+                    </div>
+                </div>
+
+                <div id="sniffMask" style="display: none; margin-top: 10px; padding: 14px; background: #fdf6ec;
+                     border: 1px solid #faecd8; border-radius: 4px; color: #e6a23c;">
+                    <i class="fas fa-spinner fa-spin"></i> 正在打开浏览器执行签到并抓取接口，约需30~60秒，请勿关闭页面...
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group" style="max-width: 240px;">
+                    <label style="font-weight: bold;">站点类型：<span style="color:#909399; font-weight:normal;">（可选）</span></label>
+                    <select id="presetSelect" class="form-control" onchange="onPresetChange()">
+                        <option value="">-- 快速填充 --</option>
+                        {% for p in presets %}
+                        <option value="{{ p.key }}" title="{{ p.desc }}">{{ p.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label style="font-weight: bold;">常用接口路径：</label>
+                    <select id="presetPath" class="form-control" onchange="onPresetPathChange()">
+                        <option value="">-- 先选择左侧站点类型 --</option>
+                    </select>
+                </div>
+            </div>
+
+            <div style="margin-bottom: 14px;">
+                <div class="btn-group" role="group">
+                    <button type="button" class="btn btn-sm" id="tabSimple" onclick="switchEditor('simple')">简易配置</button>
+                    <button type="button" class="btn btn-sm" id="tabJson" onclick="switchEditor('json')">JSON配置</button>
+                </div>
+                <input type="hidden" name="api_editor" id="apiEditor" value="{{ api_editor }}">
+            </div>
+
+            <div id="apiSimple" class="api-box">
+                <div class="form-row">
+                    <div class="form-group" style="max-width: 160px;">
+                        <label style="font-weight: bold;">请求方法：</label>
+                        <select name="api_method" class="form-control">
+                            {% for m in ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] %}
+                            <option value="{{ m }}" {% if v.api_method == m %}selected{% endif %}>{{ m }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label style="font-weight: bold;">接口地址：<span class="required">*</span></label>
+                        <input type="text" name="api_url" value="{{ v.api_url }}" placeholder="https://example.com/attendance.php">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label style="font-weight: bold;">请求头：
+                        <span style="color:#909399; font-weight:normal;">（每行一个，格式 Name: value；可用 {% raw %}{{cookie}}{% endraw %} 自动带入Cookie）</span>
+                    </label>
+                    <textarea name="api_headers" rows="4" placeholder="User-Agent: Mozilla/5.0&#10;Cookie: {% raw %}{{cookie}}{% endraw %}">{{ v.api_headers }}</textarea>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group" style="max-width: 180px;">
+                        <label style="font-weight: bold;">请求体类型：</label>
+                        <select name="api_body_type" class="form-control">
+                            {% for bt, bl in [('none','无'), ('json','JSON'), ('form','表单'), ('raw','原文')] %}
+                            <option value="{{ bt }}" {% if v.api_body_type == bt %}selected{% endif %}>{{ bl }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label style="font-weight: bold;">请求体：
+                            <span style="color:#909399; font-weight:normal;">（支持 {% raw %}{{username}}{% endraw %}、{% raw %}{{password}}{% endraw %}、{% raw %}{{date}}{% endraw %} 等变量）</span>
+                        </label>
+                        <textarea name="api_body" rows="3" placeholder='{"action":"sign"}'>{{ v.api_body }}</textarea>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label style="font-weight: bold;">变量提取：
+                        <span style="color:#909399; font-weight:normal;">（每行一个，格式 变量名=表达式，供后续步骤用 {% raw %}{{var:变量名}}{% endraw %} 引用）</span>
+                    </label>
+                    <textarea name="api_extract" rows="2" placeholder="token=json:$.data.token">{{ v.api_extract }}</textarea>
+                </div>
+            </div>
+
+            <div id="apiJson" class="api-box" style="display: none;">
+                <div class="form-group" style="margin-bottom: 8px;">
+                    <label style="font-weight: bold;">完整配置：
+                        <span style="color:#909399; font-weight:normal;">（支持多步骤请求、变量传递、代理等高级用法）</span>
+                    </label>
+                    <textarea name="api_config_json" rows="16" placeholder='{
+  "use_site_cookies": true,
+  "timeout": 20,
+  "steps": [
+    {"name": "签到", "method": "GET", "url": "https://example.com/sign",
+     "headers": {"Cookie": "{% raw %}{{cookie}}{% endraw %}"}, "body": "", "body_type": "none"}
+  ]
+}'>{{ api_config_json }}</textarea>
+                </div>
+            </div>
+
+            <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-top: 6px;">
+                <div class="form-switch" style="margin-bottom: 0;">
+                    <label class="switch">
+                        <input type="checkbox" name="api_use_cookies" {% if v.api_use_cookies %}checked{% endif %}>
+                        <span class="switch-slider"></span>
+                    </label>
+                    <span style="font-weight: bold;" class="switch-text">带上站点Cookie</span>
+                </div>
+                <div class="form-switch" style="margin-bottom: 0;">
+                    <label class="switch">
+                        <input type="checkbox" name="api_refresh_cookie" {% if v.api_refresh_cookie %}checked{% endif %}>
+                        <span class="switch-slider"></span>
+                    </label>
+                    <span style="font-weight: bold;" class="switch-text">浏览器刷新Cookie</span>
+                </div>
+                <div class="form-switch" style="margin-bottom: 0;">
+                    <label class="switch">
+                        <input type="checkbox" name="api_follow_redirect" {% if v.api_follow_redirect %}checked{% endif %}>
+                        <span class="switch-slider"></span>
+                    </label>
+                    <span style="font-weight: bold;" class="switch-text">跟随重定向</span>
+                </div>
+                <div class="form-switch" style="margin-bottom: 0;">
+                    <label class="switch">
+                        <input type="checkbox" name="api_verify_ssl" {% if v.api_verify_ssl %}checked{% endif %}>
+                        <span class="switch-slider"></span>
+                    </label>
+                    <span style="font-weight: bold;" class="switch-text">校验SSL证书</span>
+                </div>
+                <div style="display: flex; align-items: center; gap: 8px; margin-left: auto;">
+                    <span style="font-weight: bold; font-size: 15px;">超时(秒)：</span>
+                    <input type="number" name="api_timeout" value="{{ v.api_timeout }}" min="1" max="120"
+                           style="width: 90px; height: 36px; padding: 0 10px; border: 1px solid #dcdfe6; border-radius: 4px;">
+                </div>
+            </div>
+        </div>
+
+        <!-- ============ 共用：Cookies ============ -->
+        <div class="form-group" style="margin-top: 18px;">
+            <label style="display: block; margin-bottom: 7px; font-weight: bold;">Cookies： <span style="color: #909399; font-weight: normal;">（支持JSON数组、name=value格式；留空则用账号密码登录）</span></label>
+            <textarea name="cookies" rows="4" placeholder='[{"name":"uid","value":"123"}]'>{{ cookies_text }}</textarea>
+        </div>
+
+        <!-- ============ 高级设置 ============ -->
+        <details>
+            <summary>高级设置（一般留空即可）</summary>
+
+            <div class="section-title" style="margin-top: 14px;">签到成功判定</div>
+            <div class="form-row">
+                <div class="form-group">
+                    <div class="form-item-row">
+                        <label>期望状态码：</label>
+                        <input type="text" name="success_status" value="{{ v.success_status }}" placeholder="200，多个用逗号分隔">
+                    </div>
+                    <div class="form-tip">留空表示不限制状态码</div>
+                </div>
+                <div class="form-group">
+                    <div class="form-item-row">
+                        <label>成功关键词：</label>
+                        <input type="text" name="success_contains" value="{{ v.success_contains }}" placeholder="签到成功,已签到">
+                    </div>
+                    <div class="form-tip">响应中包含任意一个即算成功，留空用内置关键词</div>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <div class="form-item-row">
+                        <label>失败关键词：</label>
+                        <input type="text" name="success_not_contains" value="{{ v.success_not_contains }}" placeholder="未登录,错误">
+                    </div>
+                    <div class="form-tip">响应中包含任意一个即算失败</div>
+                </div>
+                <div class="form-group">
+                    <div class="form-item-row">
+                        <label>JSON判定：</label>
+                        <input type="text" name="success_json_path" value="{{ v.success_json_path }}" placeholder="$.success 或 data.status">
+                    </div>
+                    <div class="form-tip">填写后按JSON字段判定，期望值留空表示判断为真</div>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <div class="form-item-row">
+                        <label>JSON期望值：</label>
+                        <input type="text" name="success_json_equals" value="{{ v.success_json_equals }}" placeholder="true">
+                    </div>
+                </div>
+                <div class="form-group"></div>
+            </div>
+
+            <div id="advBrowser">
+                <div class="section-title" style="margin-top: 14px;">元素选择器（浏览器模式）</div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <div class="form-item-row">
+                            <label>用户名：</label>
+                            <input type="text" name="username_selector" value="{{ site.username_selector if site else '' }}">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <div class="form-item-row">
+                            <label>密码：</label>
+                            <input type="text" name="password_selector" value="{{ site.password_selector if site else '' }}">
+                        </div>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <div class="form-item-row">
+                            <label>验证码图片:</label>
+                            <input type="text" name="captcha_img_selector" value="{{ site.captcha_img_selector if site else '' }}">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <div class="form-item-row">
+                            <label>验证码：</label>
+                            <input type="text" name="captcha_input_selector" value="{{ site.captcha_input_selector if site else '' }}">
+                        </div>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <div class="form-item-row">
+                            <label>登录按钮：</label>
+                            <input type="text" name="submit_selector" value="{{ site.submit_selector if site else '' }}">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <div class="form-item-row">
+                            <label>签到按钮：</label>
+                            <input type="text" name="sign_button_selector" value="{{ site.sign_button_selector if site else '' }}">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </details>
+
+        <div style="margin-top: 25px; display: flex; justify-content: flex-end; gap: 12px;">
+            <button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> 保存</button>
+            <button type="submit" name="save_and_test" value="1" class="btn btn-outline-primary">
+                <i class="fas fa-vial"></i> 保存并测试
+            </button>
+            <a href="{{ url_for('index') }}" class="btn"><i class="fas fa-arrow-left"></i> 返回</a>
+        </div>
+    </form>
+</div>
+
+<script>
+    function updateModeTip() {
+        var sel = document.getElementById('modeSelect');
+        var opt = sel.options[sel.selectedIndex];
+        document.getElementById('modeTip').textContent = opt ? (opt.getAttribute('data-desc') || '') : '';
+    }
+
+    function switchMode() {
+        var m = document.getElementById('modeSelect').value;
+        var isBrowser = (m === 'browser');
+        document.getElementById('secBrowser').style.display = isBrowser ? '' : 'none';
+        document.getElementById('secApi').style.display = isBrowser ? 'none' : '';
+        document.getElementById('advBrowser').style.display = isBrowser ? '' : 'none';
+        var signUrl = document.getElementById('signUrl');
+        var loginUrl = document.getElementById('loginUrl');
+        if (isBrowser) {
+            signUrl.setAttribute('required', 'required');
+        } else {
+            signUrl.removeAttribute('required');
+            loginUrl.removeAttribute('required');
+        }
+        updateModeTip();
+    }
+
+    function switchEditor(t) {
+        document.getElementById('apiEditor').value = t;
+        document.getElementById('apiSimple').style.display = (t === 'simple') ? '' : 'none';
+        document.getElementById('apiJson').style.display = (t === 'json') ? '' : 'none';
+        document.getElementById('tabSimple').className = 'btn btn-sm' + (t === 'simple' ? ' btn-primary' : '');
+        document.getElementById('tabJson').className = 'btn btn-sm' + (t === 'json' ? ' btn-primary' : '');
+    }
+
+    function toggleCurl() {
+        var box = document.getElementById('curlBox');
+        box.style.display = (box.style.display === 'none') ? '' : 'none';
+    }
+
+    function importCurl() {
+        var text = document.getElementById('curlInput').value;
+        if (!text.trim()) {
+            alert('请先粘贴 cURL 命令');
+            return;
+        }
+        fetch('{{ url_for("api_parse_curl") }}', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({curl: text})
+        }).then(function (r) { return r.json(); }).then(function (d) {
+            if (!d.ok) {
+                alert('解析失败：' + d.error);
+                return;
+            }
+            var x = d.data;
+            document.querySelector('select[name="api_method"]').value = x.method;
+            document.querySelector('input[name="api_url"]').value = x.url;
+            var hs = '';
+            for (var k in x.headers) {
+                if (x.headers.hasOwnProperty(k)) { hs += k + ': ' + x.headers[k] + '\n'; }
+            }
+            document.querySelector('textarea[name="api_headers"]').value = hs;
+            document.querySelector('textarea[name="api_body"]').value = x.body || '';
+            document.querySelector('select[name="api_body_type"]').value = x.body_type || 'none';
+            document.getElementById('curlBox').style.display = 'none';
+            alert('导入成功，请确认下方的请求信息');
+        }).catch(function (e) {
+            alert('导入失败：' + e);
+        });
+    }
+
+    var PRESETS = {{ presets|tojson }};
+    var CANDIDATES = [];
+
+    function escapeHtml(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+            return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c];
+        });
+    }
+
+    function renderCandidates(list, msg) {
+        CANDIDATES = list || [];
+        document.getElementById('candMsg').textContent = msg || ('共 ' + CANDIDATES.length + ' 个候选');
+        var box = document.getElementById('candList');
+        box.innerHTML = '';
+        CANDIDATES.forEach(function (c, i) {
+            var row = document.createElement('div');
+            row.style.cssText = 'display:flex;gap:10px;align-items:center;padding:8px 10px;border:1px solid #ebeef5;' +
+                'border-radius:4px;margin-bottom:6px;background:#fff;';
+            row.innerHTML =
+                '<span style="font-weight:bold;color:#409eff;flex-shrink:0;">' + escapeHtml(c.method) + '</span>' +
+                '<span style="flex:1;word-break:break-all;font-size:13px;">' + escapeHtml(c.url) + '</span>' +
+                (c.response_preview ? '<span style="font-size:12px;color:#909399;max-width:220px;overflow:hidden;' +
+                    'text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(c.response_preview) + '">' +
+                    escapeHtml(c.response_preview) + '</span>' : '') +
+                '<button type="button" class="btn btn-sm btn-outline-primary" onclick="useCandidate(' + i + ')">使用</button>';
+            box.appendChild(row);
+        });
+        document.getElementById('candidateBox').style.display = '';
+    }
+
+    function useCandidate(i) {
+        var c = CANDIDATES[i];
+        if (!c) return;
+        switchEditor('simple');
+        document.querySelector('select[name="api_method"]').value = c.method;
+        document.querySelector('input[name="api_url"]').value = c.url;
+        var hs = '';
+        for (var k in c.headers) {
+            if (c.headers.hasOwnProperty(k)) hs += k + ': ' + c.headers[k] + '\n';
+        }
+        document.querySelector('textarea[name="api_headers"]').value = hs;
+        document.querySelector('textarea[name="api_body"]').value = c.body || '';
+        document.querySelector('select[name="api_body_type"]').value = c.body_type || 'none';
+        document.getElementById('candidateBox').style.display = 'none';
+        alert('已填入接口信息，请补上「成功关键词」后点「保存并测试」');
+    }
+
+    function saveThenSniff() {
+        if (!confirm('嗅探需要站点已保存。\n点击「确定」将先保存本站点，然后自动开始嗅探。')) return;
+        var f = document.getElementById('siteForm');
+        var i = document.createElement('input');
+        i.type = 'hidden';
+        i.name = 'save_then_sniff';
+        i.value = '1';
+        f.appendChild(i);
+        f.submit();
+    }
+
+    function startSniff() {
+        if (!confirm('将打开浏览器自动登录并点击签到，抓取真实接口请求。\n约需30~60秒，是否继续？')) return;
+        document.getElementById('sniffMask').style.display = '';
+        fetch('{{ url_for("api_sniff", sid=site.id) if site else "" }}', {method: 'POST'})
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                document.getElementById('sniffMask').style.display = 'none';
+                if (!d.ok) {
+                    alert('嗅探失败：' + (d.error || d.message));
+                    return;
+                }
+                renderCandidates(d.candidates, d.message);
+            })
+            .catch(function (e) {
+                document.getElementById('sniffMask').style.display = 'none';
+                alert('嗅探失败：' + e);
+            });
+    }
+
+    function uploadHar(input) {
+        if (!input.files || !input.files.length) return;
+        var fd = new FormData();
+        fd.append('har_file', input.files[0]);
+        var inc = document.getElementById('harIncludeAll');
+        fd.append('include_all', (inc && inc.checked) ? '1' : '0');
+        document.getElementById('sniffMask').style.display = '';
+        fetch('{{ url_for("api_import_har") }}', {method: 'POST', body: fd})
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                document.getElementById('sniffMask').style.display = 'none';
+                input.value = '';
+                if (!d.ok) {
+                    var tip = d.error || '未知错误';
+                    if (d.stats && d.stats.total) {
+                        tip += '\n\n（HAR中共 ' + d.stats.total + ' 条请求）';
+                    }
+                    alert(tip);
+                    return;
+                }
+                var stat = d.stats ? ('HAR共 ' + d.stats.total + ' 条请求，列出 ' + d.candidates.length + ' 个候选') : '';
+                renderCandidates(d.candidates, stat);
+            })
+            .catch(function (e) {
+                document.getElementById('sniffMask').style.display = 'none';
+                input.value = '';
+                alert('导入失败：' + e);
+            });
+    }
+
+    function siteOrigin() {
+        var v = (document.querySelector('input[name="sign_url"]').value || '').trim();
+        var m = v.match(/^(https?:\/\/[^/]+)/);
+        return m ? m[1] : '';
+    }
+
+    function onPresetChange() {
+        var key = document.getElementById('presetSelect').value;
+        var pathSel = document.getElementById('presetPath');
+        pathSel.innerHTML = '';
+        if (!key) {
+            pathSel.innerHTML = '<option value="">-- 先选择左侧站点类型 --</option>';
+            return;
+        }
+        var preset = null;
+        PRESETS.forEach(function (p) { if (p.key === key) preset = p; });
+        if (!preset) return;
+        pathSel.innerHTML = '<option value="">-- 选择接口路径 --</option>';
+        preset.paths.forEach(function (p, i) {
+            var opt = document.createElement('option');
+            opt.value = i;
+            opt.textContent = p.label;
+            pathSel.appendChild(opt);
+        });
+        if (preset.contains) {
+            document.querySelector('input[name="success_contains"]').value = preset.contains;
+        }
+        if (preset.json_path) {
+            document.querySelector('input[name="success_json_path"]').value = preset.json_path;
+            document.querySelector('input[name="success_json_equals"]').value = preset.json_equals || '';
+        }
+    }
+
+    function onPresetPathChange() {
+        var key = document.getElementById('presetSelect').value;
+        var idx = document.getElementById('presetPath').value;
+        if (!key || idx === '') return;
+        var preset = null;
+        PRESETS.forEach(function (p) { if (p.key === key) preset = p; });
+        if (!preset) return;
+        var item = preset.paths[parseInt(idx, 10)];
+        var origin = siteOrigin();
+        document.querySelector('select[name="api_method"]').value = item.method;
+        document.querySelector('input[name="api_url"]').value = origin ? (origin + item.path) : item.path;
+        if (!origin) {
+            alert('未填写签到地址，已只填入路径部分，请手动补全域名');
+        }
+        switchEditor('simple');
+    }
+
+    switchEditor('{{ api_editor }}');
+    switchMode();
+    {% if request.args.get('sniff') %}
+    setTimeout(startSniff, 400);
+    {% endif %}
+</script>
+{% endblock %}

@@ -1,0 +1,31 @@
+services:
+  auto-signin:
+    build: .
+    container_name: auto-signin
+    restart: unless-stopped
+    # 端口映射：宿主机端口:容器端口，可自行修改宿主机端口
+    ports:
+      - "56789:56789"
+    # 数据持久化挂载：宿主机目录:容器内目录
+    volumes:
+      # 核心数据：数据库、加密密钥，必须挂载
+      - ./data:/app/data
+      # 调试截图：CF验证失败时自动保存截图到此目录
+      - ./debug:/app/debug
+    environment:
+      # 时区同步，保证定时签到时间准确
+      - TZ=Asia/Shanghai
+      # Flask 生产模式，关闭 debug
+      - FLASK_DEBUG=false
+      # 管理员登录密码（在 compose 文件同目录的 .env 文件中配置，参考 .env.example）
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      # 加密密钥（跨设备迁移需保持一致；首次部署留空自动生成）
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      # 调试截图目录
+      - DEBUG_SCREENSHOT_DIR=/app/debug
+    # Chromium 容器运行必需：解除沙箱限制，避免浏览器启动崩溃
+    security_opt:
+      - seccomp:unconfined
+    # 内存限制（NAS 低配建议加上，防止浏览器占满内存）
+    mem_limit: 1g
+    memswap_limit: 1g

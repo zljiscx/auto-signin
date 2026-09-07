@@ -1,0 +1,280 @@
+{% extends "base.html" %}
+{% block title %}系统设置{% endblock %}
+{% block content %}
+<div class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px;">
+        <h2 style="margin: 0;">系统设置</h2>
+        <div style="display: flex; gap: 12px; align-items: center;">
+            <form method="post" action="{{ url_for('backup_config') }}" target="_blank">
+                <button type="submit" class="btn">
+                    <i class="fas fa-download"></i> 导出配置
+                </button>
+            </form>
+            <form method="post" action="{{ url_for('restore_config') }}" enctype="multipart/form-data"
+                  onsubmit="return confirm('确定还原配置吗？现有所有设置将被覆盖！');">
+                <div class="import-btn">
+                    <button type="button" class="btn btn-outline-primary">
+                        <i class="fas fa-upload"></i> 导入配置
+                    </button>
+                    <input type="file" name="config_file" accept=".json" onchange="this.form.submit()">
+                </div>
+            </form>
+        </div>
+    </div>
+    <!-- 主设置表单 -->
+    <form method="post">
+        <style>
+            .form-item-row {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+            }
+            .form-item-row label {
+                width: 95px;
+                flex-shrink: 0;
+                text-align: justify;
+                text-align-last: justify;
+                margin-bottom: 0 !important;
+                font-weight: bold;
+                font-size: 16px;
+            }
+            .form-input-line {
+                display: flex;
+                align-items: center;
+                flex: 1;
+                gap: 8px;
+            }
+            .form-input-line input {
+                flex: 1;
+            }
+        </style>
+
+        <!-- 第一行：每日签到时间 | 失败重试次数 -->
+        <!-- 第一行：每日签到时间 | 失败重试次数 -->
+        <div class="form-row">
+            <div class="form-group">
+                <div class="form-item-row" style="align-items: flex-start;">
+                    <label>签到时间：</label>
+                    <div class="form-input-line" style="align-items: flex-start; gap: 10px;">
+                        <!-- 左侧列表：高度跟随右侧，超出滚动 -->
+                        <div id="timeListContainer" style="flex: 1; border: 1px solid #dcdfe6; border-radius: 4px; overflow-y: auto; background: #fff;">
+                            <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+                                <tbody id="timeTableBody">
+                                {% for t in sign_times %}
+                                <tr class="time-item"
+                                    data-id="{{ t.id }}"
+                                    data-time="{{ t.time_str }}"
+                                    data-enabled="{{ t.enabled }}"
+                                    style="cursor: pointer; height: 28px; line-height: 28px;">
+                                    <td style="padding: 0 8px; width: 70%;">{{ t.time_str }}</td>
+                                    <td style="padding: 0 8px;">
+                                        {% if t.enabled == 1 %}
+                                        <span style="color: #67c23a; font-size: 12px;">启用</span>
+                                        {% else %}
+                                        <span style="color: #909399; font-size: 12px;">禁用</span>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                        <!-- 右侧：三行布局 -->
+                        <div id="timeRightCol" style="display: flex; flex-direction: column; justify-content: space-between; width: 160px; flex-shrink: 0;">
+                            <!-- 第一行：时间输入框 -->
+                            <input type="time" id="timeInput" class="form-control">
+                            <!-- 第二行：增加 + 修改 -->
+                            <div style="display: flex; gap: 6px;">
+                                <button type="button" class="btn btn-primary" onclick="addSignTime()"
+                                        style="flex: 1;">增加
+                                </button>
+                                <button type="button" class="btn btn-outline-primary" id="editTimeBtn" disabled
+                                        onclick="editSignTime()" style="flex: 1;">修改
+                                </button>
+                            </div>
+                            <!-- 第三行：启用/禁用 + 删除 -->
+                            <div style="display: flex; gap: 6px;">
+                                <button type="button" class="btn btn-outline-warning" id="toggleEnableBtn"
+                                        disabled onclick="toggleSignTimeEnable()" style="flex: 1;">启用
+                                </button>
+                                <button type="button" class="btn btn-outline-danger" id="delTimeBtn" disabled
+                                        onclick="deleteSignTime()" style="flex: 1;">删除
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <div class="form-item-row">
+                    <label>重试次数：</label>
+                    <div class="form-input-line">
+                        <input type="number" name="retry_times" value="{{ configs.retry_times }}" min="0" max="10"
+                               required style="width: 80px; flex: none;">
+                    </div>
+                    <label>CF超时：</label>
+                    <div class="form-input-line">
+                        <input type="number" name="cf_timeout" value="{{ configs.cf_timeout }}" min="10" max="600"
+                               required style="width: 80px; flex: none;">
+                        <span style="color: #909399; font-size: 13px; white-space: nowrap;">秒（手动×2）</span>
+                    </div>
+                </div>
+                <div class="form-switch" style="display: flex; align-items: center; gap: 8px; margin-top: 12px;">
+                    <label class="switch" style="margin-bottom: 0;">
+                        <input type="checkbox" name="headless" {% if configs.headless== '1' %}checked{% endif %}>
+                        <span class="switch-slider"></span>
+                    </label>
+                    <span style="font-weight: bold;" class="switch-text">无头模式（NAS/服务器建议开启）</span>
+                </div>
+            </div>
+        </div>
+
+
+        <hr class="my-4">
+        <h4 style="margin: 25px 0 15px; font-size: 16px; font-weight: 600; color: #303133;">百度OCR配置（验证码识别）</h4>
+        <div class="form-row">
+            <div class="form-group">
+                <div class="form-item-row">
+                    <label>API Key：</label>
+                    <div class="form-input-line">
+                        <input type="text" name="ocr_api_key" placeholder="留空不修改，输入 - 删除配置">
+                        <span class="{{ 'status-ok' if configs.ocr_api_configured else 'status-no' }}">
+                            （{{ '已配置' if configs.ocr_api_configured else '未配置' }}）
+                        </span>
+                    </div>
+                </div>
+            </div>
+            <div class="form-group">
+                <div class="form-item-row">
+                    <label>Secret Key :</label>
+                    <div class="form-input-line">
+                        <input type="text" name="ocr_secret_key" placeholder="留空不修改，输入 - 删除配置">
+                        <span class="{{ 'status-ok' if configs.ocr_secret_configured else 'status-no' }}">
+                            （{{ '已配置' if configs.ocr_secret_configured else '未配置' }}）
+                        </span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <hr class="my-4">
+        <h4 style="margin: 25px 0 15px; font-size: 16px; font-weight: 600; color: #303133;">企业微信推送 Webhook</h4>
+        <div class="form-group">
+            <div class="form-item-row">
+                <label>URL Key :</label>
+                <div class="form-input-line">
+                    <input type="text" name="wecom_webhook_key" placeholder="留空不修改，输入 - 删除配置">
+                    <span class="{{ 'status-ok' if configs.wecom_configured else 'status-no' }}">
+                        （{{ '已配置' if configs.wecom_configured else '未配置' }}）
+                    </span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 底部按钮靠右 -->
+        <div style="margin-top: 25px; display: flex; justify-content: flex-end; gap: 12px;">
+            <button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> 保存</button>
+            <a href="{{ url_for('index') }}" class="btn"><i class="fas fa-arrow-left"></i> 返回</a>
+        </div>
+    </form>
+</div>
+<!-- 签到时间操作共用隐藏表单 -->
+<form id="timeActionForm" method="POST" style="display: none;">
+    <input type="hidden" name="time_str" id="hiddenTimeStr">
+    <input type="hidden" name="enabled" id="hiddenEnabled" value="1">
+    <input type="hidden" name="remark" value="">
+</form>
+
+<script>
+    let selectedTimeId = null;
+    let selectedEnabled = 1;
+
+    // 同步列表框高度与右侧一致
+    function syncListHeight() {
+        var rightCol = document.getElementById('timeRightCol');
+        var listContainer = document.getElementById('timeListContainer');
+        if (rightCol && listContainer) {
+            listContainer.style.height = rightCol.offsetHeight + 'px';
+        }
+    }
+    syncListHeight();
+    window.addEventListener('resize', syncListHeight);
+
+    // 列表行点击选中
+    document.querySelectorAll('.time-item').forEach(row => {
+        row.addEventListener('click', function() {
+            // 清除其他行高亮
+            document.querySelectorAll('.time-item').forEach(r => {
+                r.style.backgroundColor = '';
+            });
+            // 当前行选中高亮
+            this.style.backgroundColor = '#ecf5ff';
+            // 记录选中数据
+            selectedTimeId = this.dataset.id;
+            selectedEnabled = parseInt(this.dataset.enabled);
+            // 时间填入输入框
+            document.getElementById('timeInput').value = this.dataset.time;
+            // 解锁修改、删除按钮
+            document.getElementById('editTimeBtn').disabled = false;
+            document.getElementById('delTimeBtn').disabled = false;
+            // 处理启用/禁用按钮文字与状态
+            const toggleBtn = document.getElementById('toggleEnableBtn');
+            toggleBtn.disabled = false;
+            toggleBtn.innerText = selectedEnabled === 1 ? '禁用' : '启用';
+        });
+    });
+
+    // 增加时间
+    function addSignTime() {
+        const timeVal = document.getElementById('timeInput').value;
+        if (!timeVal) {
+            alert('请先选择签到时间');
+            return;
+        }
+        const form = document.getElementById('timeActionForm');
+        form.action = "{{ url_for('add_sign_time_route') }}";
+        document.getElementById('hiddenTimeStr').value = timeVal;
+        form.submit();
+    }
+
+    // 修改时间
+    function editSignTime() {
+        if (!selectedTimeId) return;
+        const timeVal = document.getElementById('timeInput').value;
+        if (!timeVal) {
+            alert('请选择签到时间');
+            return;
+        }
+        const form = document.getElementById('timeActionForm');
+        form.action = `/settings/time/edit/${selectedTimeId}`;
+        document.getElementById('hiddenTimeStr').value = timeVal;
+        document.getElementById('hiddenEnabled').value = selectedEnabled;
+        form.submit();
+    }
+
+    // 切换启用/禁用状态
+    function toggleSignTimeEnable() {
+        if (!selectedTimeId) return;
+        const newEnabled = selectedEnabled === 1 ? 0 : 1;
+        const form = document.getElementById('timeActionForm');
+        form.action = `/settings/time/edit/${selectedTimeId}`;
+        // 时间保持原值不变，仅切换状态
+        const currentRow = document.querySelector(`.time-item[data-id="${selectedTimeId}"]`);
+        document.getElementById('hiddenTimeStr').value = currentRow.dataset.time;
+        document.getElementById('hiddenEnabled').value = newEnabled;
+        form.submit();
+    }
+
+    // 删除时间
+    function deleteSignTime() {
+        if (!selectedTimeId) return;
+        if (!confirm('确定删除该签到时间？')) return;
+        const form = document.getElementById('timeActionForm');
+        form.action = `/settings/time/delete/${selectedTimeId}`;
+        form.submit();
+    }
+</script>
+
+
+{% endblock %}
