@@ -45,7 +45,8 @@ def init_db():
         _add_column_if_not_exists(conn, 'sites', 'sign_button_selector', 'TEXT')
         _add_column_if_not_exists(conn, 'sites', 'login_first', 'INTEGER DEFAULT 0')
         # ========== 多模式签到支持 ==========
-        # mode: browser=浏览器模拟 / api=HTTP接口直连
+        # mode: browser=浏览器模拟 / api=HTTP接口直连（支持可选登录接口）
+        #       browser_api=浏览器登录+API签到（浏览器真实登录绕过WAF，再用接口签到）
         _add_column_if_not_exists(conn, 'sites', 'mode', "TEXT DEFAULT 'browser'")
         # api_config: API模式请求配置(JSON字符串)
         _add_column_if_not_exists(conn, 'sites', 'api_config', 'TEXT')

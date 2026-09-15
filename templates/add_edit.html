@@ -67,7 +67,7 @@
                     <label>登录地址：</label>
                     <input type="url" name="login_url" id="loginUrl" value="{{ site.login_url if site else '' }}">
                 </div>
-                <div class="form-tip">账号密码登录时必填；API模式开启「浏览器刷新Cookie」时也要填</div>
+                <div class="form-tip">账号密码登录时必填；「浏览器登录+API签到」模式必填；API模式开启「浏览器刷新Cookie」时也要填</div>
             </div>
             <div class="form-group">
                 <div class="form-item-row">
@@ -279,8 +279,122 @@
   "steps": [
     {"name": "签到", "method": "GET", "url": "https://example.com/sign",
      "headers": {"Cookie": "{% raw %}{{cookie}}{% endraw %}"}, "body": "", "body_type": "none"}
-  ]
+  ],
+  "login": {
+    "steps": [
+      {"name": "登录", "method": "POST", "url": "https://example.com/login",
+       "headers": {"Content-Type": "application/json"}, "body": "{\"user\":\"{{username}}\",\"pass\":\"{{password}}\"}",
+       "body_type": "json", "extract": {"token": "json:$.token"}}
+    ],
+    "success_rule": {"status": 200}
+  }
 }'>{{ api_config_json }}</textarea>
+                </div>
+            </div>
+
+            <!-- 登录接口（可选）：与签到接口同款表单式简易配置 -->
+            <div id="secApiLogin">
+                <div class="section-title" style="margin-top: 16px;">登录接口（可选）— 部分站点需先用接口登录换取Cookie</div>
+                <div class="api-box">
+                    <div style="font-size: 13px; line-height: 1.7; color: #909399; margin-bottom: 12px;">
+                        适用场景：站点需要独立的登录接口换取会话Cookie，再用Cookie去签到。执行逻辑：<b>无Cookie先登录</b> → 拿到Cookie再签到；
+                        <b>有Cookie直接签到</b>，签到失败（Cookie失效）则<b>重新登录</b>再签到一次。留空则不配置登录接口。
+                        登录响应中的 <code>Set-Cookie</code> 会自动写入Cookie池供签到使用；用「变量提取」取出的变量可在签到中以
+                        {% raw %}{{var:变量名}}{% endraw %} 引用。
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group" style="max-width: 160px;">
+                            <label style="font-weight: bold;">请求方法：</label>
+                            <select name="login_method" class="form-control">
+                                {% for m in ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] %}
+                                <option value="{{ m }}" {% if v.login_method == m %}selected{% endif %}>{{ m }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label style="font-weight: bold;">登录地址：<span class="required">*</span></label>
+                            <input type="text" name="login_api_url" value="{{ v.login_url }}" placeholder="https://example.com/api/login">
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label style="font-weight: bold;">请求头：
+                            <span style="color:#909399; font-weight:normal;">（每行一个，格式 Name: value；可用 {% raw %}{{username}}{% endraw %}、{% raw %}{{password}}{% endraw %}、{% raw %}{{cookie}}{% endraw %} 等变量）</span>
+                        </label>
+                        <textarea name="login_headers" rows="3" placeholder="Content-Type: application/json">{{ v.login_headers }}</textarea>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group" style="max-width: 180px;">
+                            <label style="font-weight: bold;">请求体类型：</label>
+                            <select name="login_body_type" class="form-control">
+                                {% for bt, bl in [('none','无'), ('json','JSON'), ('form','表单'), ('raw','原文')] %}
+                                <option value="{{ bt }}" {% if v.login_body_type == bt %}selected{% endif %}>{{ bl }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label style="font-weight: bold;">请求体：
+                                <span style="color:#909399; font-weight:normal;">（支持 {% raw %}{{username}}{% endraw %}、{% raw %}{{password}}{% endraw %} 等变量）</span>
+                            </label>
+                            <textarea name="login_body" rows="3" placeholder='{"user":"{{username}}","pass":"{{password}}"}'>{{ v.login_body }}</textarea>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label style="font-weight: bold;">变量提取：
+                            <span style="color:#909399; font-weight:normal;">（每行一个，格式 变量名=表达式，供签到步骤用 {% raw %}{{var:变量名}}{% endraw %} 引用）</span>
+                        </label>
+                        <textarea name="login_extract" rows="2" placeholder="token=json:$.data.token">{{ v.login_extract }}</textarea>
+                    </div>
+
+                    <details style="margin-top: 4px;">
+                        <summary style="font-size: 14px; cursor: pointer;">登录成功判定（可选，可留空）</summary>
+                        <div style="padding: 10px 4px 0;">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <div class="form-item-row">
+                                        <label>期望状态码：</label>
+                                        <input type="text" name="login_success_status" value="{{ v.login_success_status }}" placeholder="200，多个用逗号分隔">
+                                    </div>
+                                    <div class="form-tip">留空表示不限制状态码</div>
+                                </div>
+                                <div class="form-group">
+                                    <div class="form-item-row">
+                                        <label>成功关键词：</label>
+                                        <input type="text" name="login_success_contains" value="{{ v.login_success_contains }}" placeholder="登录成功,ok">
+                                    </div>
+                                    <div class="form-tip">响应中包含任意一个即算登录成功</div>
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <div class="form-item-row">
+                                        <label>失败关键词：</label>
+                                        <input type="text" name="login_success_not_contains" value="{{ v.login_success_not_contains }}" placeholder="未登录,错误">
+                                    </div>
+                                    <div class="form-tip">响应中包含任意一个即算登录失败</div>
+                                </div>
+                                <div class="form-group">
+                                    <div class="form-item-row">
+                                        <label>JSON判定：</label>
+                                        <input type="text" name="login_success_json_path" value="{{ v.login_success_json_path }}" placeholder="$.success 或 data.code">
+                                    </div>
+                                    <div class="form-tip">填写后按JSON字段判定，期望值留空表示判断为真</div>
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <div class="form-item-row">
+                                        <label>JSON期望值：</label>
+                                        <input type="text" name="login_success_json_equals" value="{{ v.login_success_json_equals }}" placeholder="true">
+                                    </div>
+                                </div>
+                                <div class="form-group"></div>
+                            </div>
+                        </div>
+                    </details>
                 </div>
             </div>
 
@@ -440,19 +554,35 @@
 
     function switchMode() {
         var m = document.getElementById('modeSelect').value;
-        var isBrowser = (m === 'browser');
+        // browser / browser_api 都需要浏览器登录相关字段（账号密码、选择器）
+        var isBrowser = (m === 'browser' || m === 'browser_api');
+        // api / browser_api 都需要 API 接口配置（browser_api 用浏览器登录、API签到）
+        var hasApi = (m === 'api' || m === 'browser_api');
         document.getElementById('secBrowser').style.display = isBrowser ? '' : 'none';
-        document.getElementById('secApi').style.display = isBrowser ? 'none' : '';
+        document.getElementById('secApi').style.display = hasApi ? '' : 'none';
         document.getElementById('advBrowser').style.display = isBrowser ? '' : 'none';
+        refreshLoginSection();
         var signUrl = document.getElementById('signUrl');
         var loginUrl = document.getElementById('loginUrl');
-        if (isBrowser) {
+        if (m === 'browser') {
             signUrl.setAttribute('required', 'required');
         } else {
             signUrl.removeAttribute('required');
+        }
+        if (m === 'browser_api') {
+            loginUrl.setAttribute('required', 'required');
+        } else {
             loginUrl.removeAttribute('required');
         }
         updateModeTip();
+    }
+
+    // 登录接口区块：仅在「纯 api 模式」且「简易配置」标签页下显示
+    function refreshLoginSection() {
+        var m = document.getElementById('modeSelect').value;
+        var ed = document.getElementById('apiEditor').value;
+        var show = (m === 'api' && ed === 'simple');
+        document.getElementById('secApiLogin').style.display = show ? '' : 'none';
     }
 
     function switchEditor(t) {
@@ -461,6 +591,7 @@
         document.getElementById('apiJson').style.display = (t === 'json') ? '' : 'none';
         document.getElementById('tabSimple').className = 'btn btn-sm' + (t === 'simple' ? ' btn-primary' : '');
         document.getElementById('tabJson').className = 'btn btn-sm' + (t === 'json' ? ' btn-primary' : '');
+        refreshLoginSection();
     }
 
     function toggleCurl() {

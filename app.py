@@ -169,7 +169,46 @@ def _render_form(site, cookies_text, form=None):
         'success_not_contains': ','.join(rule.get('not_contains') or []),
         'success_json_path': rule.get('json_path') or '',
         'success_json_equals': '' if rule.get('json_equals') is None else str(rule.get('json_equals')),
+        # 登录接口（可选）简易编辑器字段（下面根据已保存配置回填）
+        'login_method': 'POST',
+        'login_url': '',
+        'login_headers': '',
+        'login_body_type': 'none',
+        'login_body': '',
+        'login_extract': '',
+        'login_success_status': '',
+        'login_success_contains': '',
+        'login_success_not_contains': '',
+        'login_success_json_path': '',
+        'login_success_json_equals': '',
     }
+
+    # 登录接口（可选）：从已保存的 login 配置回填简易编辑器字段
+    login_raw = cfg.get('login') or {}
+    if isinstance(login_raw, list):
+        login_steps = login_raw
+        login_rule = {}
+    else:
+        login_steps = (login_raw or {}).get('steps') or []
+        login_rule = (login_raw or {}).get('success_rule') or {}
+    login_step = login_steps[0] if login_steps else {}
+    values.update({
+        'login_method': login_step.get('method') or 'POST',
+        'login_url': login_step.get('url') or '',
+        'login_headers': '\n'.join('%s: %s' % (k, v) for k, v in (login_step.get('headers') or {}).items()),
+        'login_body_type': login_step.get('body_type') or 'none',
+        'login_body': login_step.get('body') or '',
+        'login_extract': '\n'.join('%s=%s' % (k, v) for k, v in (login_step.get('extract') or {}).items()),
+        'login_success_status': ','.join(str(x) for x in (login_rule.get('status') or [])),
+        'login_success_contains': ','.join(login_rule.get('contains') or []),
+        'login_success_not_contains': ','.join(login_rule.get('not_contains') or []),
+        'login_success_json_path': login_rule.get('json_path') or '',
+        'login_success_json_equals': '' if login_rule.get('json_equals') is None else str(login_rule.get('json_equals')),
+    })
+
+    # 表单回显时保留 API 登录区块的地址字段（其表单名是 login_api_url，与顶部登录地址不同名）
+    if form and form.get('login_api_url') is not None:
+        values['login_url'] = form.get('login_api_url')
 
     checkbox_keys = ('api_use_cookies', 'api_refresh_cookie', 'api_follow_redirect', 'api_verify_ssl')
     for key in list(values.keys()):
@@ -185,7 +224,8 @@ def _render_form(site, cookies_text, form=None):
 
     return render_template('add_edit.html', site=site or None, cookies_text=cookies_text,
                            executors=list_executors(), api_editor=api_editor,
-                           api_config_json=api_config_json, v=values, presets=get_presets())
+                           api_config_json=api_config_json,
+                           v=values, presets=get_presets())
 
 
 def _run_test_and_flash(site_id, name):
@@ -277,16 +317,42 @@ def _build_api_config(form):
             'extract': extract
         }]
     }
+    # 登录接口（可选）：与签到接口同款表单式简易配置（仅 api 模式生效；
+    # browser_api 的登录走浏览器，忽略此处的 API 登录步骤）
+    login_url = (form.get('login_api_url') or '').strip()
+    if login_url and form.get('mode') == 'api':
+        login_method = (form.get('login_method') or 'POST').strip().upper()
+        login_headers = _parse_kv_lines(form.get('login_headers'))
+        login_extract = _parse_kv_lines(form.get('login_extract'), sep='=')
+        login_body = form.get('login_body') or ''
+        login_body_type = form.get('login_body_type') or ('none' if not login_body.strip() else 'raw')
+        if not login_body.strip():
+            login_body_type = 'none'
+        login_step = {
+            'name': '登录',
+            'method': login_method,
+            'url': login_url,
+            'headers': login_headers,
+            'body': login_body,
+            'body_type': login_body_type,
+            'extract': login_extract
+        }
+        login_rule = _build_success_rule(form, prefix='login_success_')
+        login_cfg = {'steps': [login_step]}
+        if login_rule:
+            login_cfg['success_rule'] = login_rule
+        cfg['login'] = login_cfg
     return json.dumps(cfg, ensure_ascii=False)
 
 
-def _build_success_rule(form):
-    """组装 success_rule JSON 字符串"""
+def _build_success_rule(form, prefix='success_'):
+    """组装 success_rule（或登录接口的 success_rule）JSON 字符串。
+    prefix 用于区分签到判定(success_)与登录判定(login_success_)。"""
     def split_words(text):
         return [w.strip() for w in (text or '').replace('，', ',').split(',') if w.strip()]
 
     rule = {}
-    status_text = (form.get('success_status') or '').strip()
+    status_text = (form.get(prefix + 'status') or '').strip()
     if status_text:
         status_list = []
         for part in status_text.replace('，', ',').split(','):
@@ -300,17 +366,17 @@ def _build_success_rule(form):
         if status_list:
             rule['status'] = status_list
 
-    contains = split_words(form.get('success_contains'))
+    contains = split_words(form.get(prefix + 'contains'))
     if contains:
         rule['contains'] = contains
-    not_contains = split_words(form.get('success_not_contains'))
+    not_contains = split_words(form.get(prefix + 'not_contains'))
     if not_contains:
         rule['not_contains'] = not_contains
-    json_path = (form.get('success_json_path') or '').strip()
+    json_path = (form.get(prefix + 'json_path') or '').strip()
     if json_path:
         rule['json_path'] = json_path
-        rule['json_equals'] = (form.get('success_json_equals') or '').strip()
-    return json.dumps(rule, ensure_ascii=False) if rule else None
+        rule['json_equals'] = (form.get(prefix + 'json_equals') or '').strip()
+    return rule if rule else None
 
 
 def _collect_site_form(form):
@@ -339,7 +405,7 @@ def _collect_site_form(form):
         'login_first': 1 if form.get('login_first') else 0,
         'mode': mode,
         'api_config': _build_api_config(form),
-        'success_rule': _build_success_rule(form)
+        'success_rule': _to_json_str(_build_success_rule(form))
     }
 
     # API模式下签到地址可留空，自动从接口地址推导，用于列表展示与Cookie域名识别
