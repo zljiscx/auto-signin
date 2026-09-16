@@ -77,8 +77,8 @@ def _pick(d, *keys):
 @register_executor
 class BuddyExecutor(BaseExecutor):
     mode = 'buddy'
-    label = 'Buddy令牌签到'
-    description = 'WorkBuddy/Buddy加油站令牌式签到：粘贴token_store或读取本机登录态，自动续期保持永久登录，按本项目时间表执行'
+    label = 'Buddy专用(令牌)'
+    description = 'Buddy加油站/WorkBuddy 专用令牌式签到：三个接口内置、无需配置，粘贴token_store或读取本机登录态，自动续期保持永久登录，按本项目时间表执行'
 
     def __init__(self, ctx):
         BaseExecutor.__init__(self, ctx)
@@ -113,8 +113,10 @@ class BuddyExecutor(BaseExecutor):
             ctx.log('Buddy 签到失败: ' + (lines[0] if lines else '未知错误'), 'error')
             return SignResult(False, '签到失败', None)
 
-        # 签到成功：查询状态汇总（仅写入日志，推送只发结果）
+        # 签到成功：查询状态汇总，构造推送末尾的 Buddy 信息块（细节仅在此展示，不进主结果行）
+        credit = _pick(checkin_data, "credit", "today_credit", "daily_credit") if checkin_data else None
         status_info = self._fetch_status(token, uid, domain)
+        today_c = streak = total = None
         if status_info:
             today_c = _pick(status_info, "today_credit", "todayCredit")
             streak = _pick(status_info, "streak_days", "streakDays", "continuous_days", "continuousDays")
@@ -128,9 +130,20 @@ class BuddyExecutor(BaseExecutor):
                 parts.append("累计=%s" % total)
             if parts:
                 ctx.log('Buddy 签到汇总: ' + ' '.join(parts))
+        # 拼接待追加到推送末尾的 Buddy 签到信息块（与前面的站点结果空一行）
+        buddy_lines = ["【Buddy加油站签到信息】"]
+        if credit is not None:
+            buddy_lines.append("  本次获得积分：%s" % credit)
+        if today_c is not None:
+            buddy_lines.append("  今日积分：%s" % today_c)
+        if streak is not None:
+            buddy_lines.append("  连续签到：%s 天" % streak)
+        if total is not None:
+            buddy_lines.append("  累计积分：%s" % total)
+        appendix = "\n".join(buddy_lines) if len(buddy_lines) > 1 else ""
         detail = json.dumps(checkin_data, ensure_ascii=False)[:500] if checkin_data else ""
         msg = '今日已签到' if status == 'already' else '签到成功'
-        return SignResult(True, msg, None, detail)
+        return SignResult(True, msg, None, detail, appendix)
 
     # ---------- 令牌加载 ----------
     def _load_token(self):
@@ -277,8 +290,8 @@ class BuddyExecutor(BaseExecutor):
         return 'fail', ["签到异常 code=%s msg=%s" % (code, msg)], data
 
     def _fetch_status(self, token, uid, domain):
-        """查询签到状态；成功返回 data 字典，失败返回 {}。"""
-        st, body = self._call(ENDPOINT_STATUS, token, uid, domain, method="GET")
+        """查询签到状态；成功返回 data 字典，失败返回 {}。该接口须用 POST（与原 buddy_checkin.py 一致）。"""
+        st, body = self._call(ENDPOINT_STATUS, token, uid, domain)
         if st == 200:
             try:
                 return json.loads(body).get("data", {}) or {}

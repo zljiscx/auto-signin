@@ -11,7 +11,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from models import (init_db, get_all_sites, get_site, add_site, update_site, delete_site, get_config, set_config,
                     get_all_configs, get_recent_sign_logs, get_all_sign_times, add_sign_time,
                     update_sign_time, delete_sign_time, get_sign_time, update_site_cookies,
-                    update_site_token_store)
+                    update_site_token_store, update_site_browser_headers)
 from scheduler import start_scheduler, stop_scheduler, restart_scheduler
 from sign_service import run_single_sign
 from utils import (parse_cookies_input, encrypt_data, decrypt_data, normalize_cookies, get_encryption_key_info,
@@ -245,11 +245,6 @@ def _render_form(site, cookies_text, form=None):
         except Exception:
             pass
 
-    # Buddy 模式字段回显（api_config 里存了 auth_file/api_bases/domain）
-    values['buddy_auth_file'] = cfg.get('auth_file') or ''
-    values['buddy_api_bases'] = ','.join(cfg.get('api_bases') or []) if cfg.get('api_bases') else ''
-    values['buddy_domain'] = cfg.get('domain') or ''
-
     return render_template('add_edit.html', site=site or None, cookies_text=cookies_text,
                            executors=list_executors(), api_editor=api_editor,
                            api_config_json=api_config_json,
@@ -375,21 +370,6 @@ def _build_api_config(form):
     return json.dumps(cfg, ensure_ascii=False)
 
 
-def _build_buddy_config(form):
-    """组装 Buddy 令牌式站点的 api_config（auth_file / api_bases / domain）JSON 字符串"""
-    auth_file = (form.get('buddy_auth_file') or '').strip()
-    api_bases_raw = (form.get('buddy_api_bases') or '').strip()
-    domain = (form.get('buddy_domain') or '').strip()
-    cfg = {}
-    if auth_file:
-        cfg['auth_file'] = auth_file
-    if api_bases_raw:
-        cfg['api_bases'] = [b.strip() for b in api_bases_raw.split(',') if b.strip()]
-    if domain:
-        cfg['domain'] = domain
-    return json.dumps(cfg, ensure_ascii=False) if cfg else ''
-
-
 def _handle_token_store_form(sid, raw):
     """校验并保存「令牌」框内容；返回错误字符串或 None（保存成功/无需保存）"""
     raw = (raw or '').strip()
@@ -469,9 +449,20 @@ def _collect_site_form(form):
         'sign_button_selector': (form.get('sign_button_selector') or '').strip(),
         'login_first': 1 if form.get('login_first') else 0,
         'mode': mode,
-        'api_config': _build_api_config(form) if mode != 'buddy' else _build_buddy_config(form),
+        'api_config': _build_api_config(form) if mode != 'buddy' else '',
         'success_rule': _to_json_str(_build_success_rule(form))
     }
+
+    # Buddy 专用模式：接口全部内置、无需配置，除「令牌」外其它字段均为冗余，保存时全部清空
+    if mode == 'buddy':
+        for k in ('login_url', 'sign_url', 'username', 'username_selector',
+                  'password_selector', 'captcha_img_selector', 'captcha_input_selector',
+                  'submit_selector', 'sign_button_selector', 'success_rule'):
+            data[k] = ''
+        data['has_captcha'] = 0
+        data['has_cloudflare'] = 0
+        data['login_first'] = 0
+        data['api_config'] = ''
 
     # API模式下签到地址可留空，自动从接口地址推导，用于列表展示与Cookie域名识别
     if not data['sign_url'] and data['api_config']:
@@ -565,9 +556,12 @@ def add():
             return render_template('add_edit.html', site=None, cookies_text=request.form.get('cookies', '').strip(),
                                    executors=list_executors(), api_editor=request.form.get('api_editor', 'simple'),
                                    api_config_json=request.form.get('api_config_json', ''))
-        data['password'] = encrypt_data(request.form.get('password', '').strip())
+        is_buddy = data['mode'] == 'buddy'
+        data['password'] = '' if is_buddy else encrypt_data(request.form.get('password', '').strip())
         cookies_raw = request.form.get('cookies', '').strip()
-        if cookies_raw:
+        if is_buddy:
+            data['cookies'] = None
+        elif cookies_raw:
             try:
                 parsed = parse_cookies_input(cookies_raw)
                 if parsed:
@@ -591,6 +585,8 @@ def add():
                 site_display = dict(get_site(new_id))
                 site_display['password'] = ''
                 return _render_form(site_display, '', request.form)
+            if is_buddy:
+                update_site_browser_headers(new_id, None)
             flash(f'站点「{data["name"]}」添加成功 (ID: {new_id})', 'success')
             if request.form.get('save_then_sniff'):
                 return redirect(url_for('edit', sid=new_id, sniff=1))
@@ -650,10 +646,15 @@ def edit(sid):
             site_display = dict(site)
             site_display['password'] = ''
             return _render_form(site_display, new_cookies_raw, request.form)
+        if data['mode'] == 'buddy':
+            encrypted_password = ''
+            encrypted_cookies = None
         data['password'] = encrypted_password
         data['cookies'] = encrypted_cookies
         try:
             update_site(sid, data)
+            if data['mode'] == 'buddy':
+                update_site_browser_headers(sid, None)
             # Buddy 令牌式站点：处理「令牌」框（空=清空，粘贴=更新）
             token_raw = request.form.get('token_store', '').strip()
             if not token_raw:

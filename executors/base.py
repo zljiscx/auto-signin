@@ -36,11 +36,12 @@ def filter_cookies(cookies_list):
 class SignResult(object):
     """统一的签到结果"""
 
-    def __init__(self, success, message='', cookies=None, detail=''):
+    def __init__(self, success, message='', cookies=None, detail='', appendix=''):
         self.success = bool(success)
         self.message = message or ''
         self.cookies = cookies          # 本次执行后得到的最新Cookie列表（None表示不更新）
         self.detail = detail            # 详情（如响应片段），用于排查
+        self.appendix = appendix        # 追加到推送末尾的扩展信息块（如 Buddy 签到汇总），空串表示无
 
     def __bool__(self):
         return self.success

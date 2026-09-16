@@ -33,6 +33,7 @@ def sign_site(site, ocr_config, retry_times=3, is_manual=False):
 
     success = False
     msg = ''
+    appendix = ''
 
     try:
         for attempt in range(1, retry_times + 1):
@@ -43,6 +44,7 @@ def sign_site(site, ocr_config, retry_times=3, is_manual=False):
                     msg = '执行器未返回结果'
                 else:
                     msg = result.message or ''
+                    appendix = getattr(result, 'appendix', '') or ''
                     if result.cookies:
                         ctx.set_cookies(result.cookies)
                     if result.success:
@@ -92,7 +94,7 @@ def sign_site(site, ocr_config, retry_times=3, is_manual=False):
             pass
 
     duration = int(time.time() - start_time)
-    return success, msg, duration
+    return success, msg, duration, appendix
 
 def run_single_sign(site_id, is_manual=False):
     """单站点签到入口（线程安全，手动签到不受当日状态限制）"""
@@ -110,7 +112,7 @@ def run_single_sign(site_id, is_manual=False):
             'secret_key': configs.get('ocr_secret_key', '')
         }
         retry_times = int(configs.get('retry_times', 3))
-        success, msg, duration = sign_site(site, ocr_config, retry_times, is_manual=is_manual)
+        success, msg, duration, appendix = sign_site(site, ocr_config, retry_times, is_manual=is_manual)
         add_sign_log(site['id'], site['name'], success, msg, is_manual, duration)
         return success, msg
     finally:
@@ -124,6 +126,7 @@ def run_all_scheduled_sign():
         return
     _sign_lock.acquire()
     results = []
+    appendices = []
     skip_count = 0
     try:
         configs = get_all_configs()
@@ -159,10 +162,12 @@ def run_all_scheduled_sign():
 
         for site in sites:
             try:
-                success, msg, duration = sign_site(site, ocr_config, retry_times, is_manual=False)
+                success, msg, duration, appendix = sign_site(site, ocr_config, retry_times, is_manual=False)
                 add_sign_log(site['id'], site['name'], success, msg, False, duration)
                 status = "✅" if success else "❌"
                 results.append(f"{status} {site['name']} - {msg}")
+                if appendix:
+                    appendices.append(appendix)
             except Exception as e:
                 results.append(f"⚠️ {site['name']} - 异常: {str(e)}")
                 logger.error(f"站点 {site['name']} 异常: {e}")
@@ -172,6 +177,9 @@ def run_all_scheduled_sign():
         if results and webhook_key:
             now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             summary = f"【自动签到结果】\n时间：{now}\n本次执行 {len(sites)} 个站点，跳过 {skip_count} 个已成功站点\n\n" + "\n".join(results)
+            # Buddy 等附加信息块统一追加在所有站点结果之后，与前文空一行
+            if appendices:
+                summary += "\n\n" + "\n\n".join(appendices)
             send_wecom_text_message(webhook_key, summary)
     except Exception as e:
         logger.error(f"定时签到全局异常: {e}")
