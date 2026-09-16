@@ -8,6 +8,7 @@
 """
 import os
 import time
+import json
 import shutil
 import tempfile
 import logging
@@ -253,19 +254,168 @@ def is_logged_in(driver, keywords=None):
 
 
 def is_login_page(driver):
-    """多维度判断是否为登录页"""
+    """多维度判断是否为登录页（放宽以兼容非 NexusPHP 架构，如 React/Vue SPA）"""
     url = (driver.get_current_url() or '').lower()
-    login_keywords = ['login', 'signin', 'log-in', 'sign-in', '登录', '登入']
+    login_keywords = ['login', 'signin', 'log-in', 'sign-in', '登录', '登入', '/login', '/signin']
     if any(k in url for k in login_keywords):
         return True
     try:
-        if not driver.page.ele('input[type="password"]', timeout=0.5):
-            return False
-        return bool(driver.page.ele('input[name="username"]', timeout=0.3) or
-                    driver.page.ele('input[name="user"]', timeout=0.3))
+        # 存在密码输入框即大概率为登录页（用户名框命名多样：email/phone/account/identity 等）
+        if driver.page.ele('input[type="password"]', timeout=0.5):
+            return True
     except Exception:
         pass
     return False
+
+
+# 登录失败提示关键词：出现即说明登录未成功，可提前结束等待（避免空等 30s）
+LOGIN_FAIL_KEYWORDS = [
+    '账号或密码错误', '帐号或密码错误', '用户名或密码错误', '用户名或密码不对',
+    '密码错误', '密码不正确', '验证码错误', '验证码不正确', '验证码失效',
+    '请先登录', '请先登陆', 'incorrect', 'invalid username', 'wrong password',
+    'invalid credentials', 'login failed',
+]
+
+
+def _login_failed(html):
+    """页面是否出现登录失败提示，返回命中的关键词或 None"""
+    html = html or ''
+    for kw in LOGIN_FAIL_KEYWORDS:
+        if kw in html:
+            return kw
+    return None
+
+
+def detect_login_fields(driver):
+    """通用登录字段自适应识别：兼容 NexusPHP 之外的现代 SPA / React / Vue 等架构。
+
+    返回 {username, password, submit} 选择器（CSS 或 XPath）；识别不到的字段为 None。
+    优先使用 id/name/type/autocomplete/placeholder 等稳定属性，避免依赖会变化的
+    CSS-Modules / Tailwind 哈希类名。用户显式配置的选择器始终优先，本函数仅作兜底。
+    """
+    js = r'''
+    return (function(){
+      function lower(s){ return (s||'').toLowerCase(); }
+      function hasAny(s, keys){ s = lower(s); for (var i=0;i<keys.length;i++){ if(s.indexOf(keys[i])>=0) return true; } return false; }
+      var PW = document.querySelector('input[type=password]');
+      if(!PW) return JSON.stringify({username:null, password:null, submit:null});
+      var form = PW.closest ? PW.closest('form') : null;
+      var scope = form || document;
+      var USER_KEYS = ['user','username','email','account','login','phone','mobile','identity','name','mail'];
+      var USER_PH  = ['邮箱','用户名','手机','账号','账户','用户','email','phone','mail'];
+      var LOGIN_TXT = ['登录','登入','登陆','提交','sign in','log in','login','submit','signin','sign in now'];
+      var username = null, best = -1;
+      var inputs = scope.querySelectorAll('input');
+      for (var i=0;i<inputs.length;i++){
+        var el = inputs[i];
+        if (el === PW) continue;
+        var t = lower(el.getAttribute('type'));
+        if (t==='password'||t==='hidden'||t==='submit'||t==='button'||t==='checkbox'||t==='radio'||t==='file') continue;
+        var score = 0;
+        var ac = lower(el.getAttribute('autocomplete'));
+        var nm = lower((el.getAttribute('name')||'') + ' ' + (el.getAttribute('id')||''));
+        var ph = lower(el.getAttribute('placeholder'));
+        if (/username|email|tel|nickname|account/.test(ac)) score += 100;
+        if (hasAny(nm, USER_KEYS)) score += 60;
+        if (hasAny(ph, USER_PH)) score += 60;
+        if (t==='email'||t==='tel') score += 40;
+        if (score > best){ best = score; username = el; }
+      }
+      function cssOf(el){
+        var id = el.getAttribute('id');
+        if (id && /^[A-Za-z][\w\-:]*$/.test(id)) return el.tagName.toLowerCase() + '#' + id;
+        var name = el.getAttribute('name');
+        if (name) return el.tagName.toLowerCase() + '[name="' + name + '"]';
+        var ac = el.getAttribute('autocomplete');
+        if (ac) return el.tagName.toLowerCase() + '[autocomplete="' + ac + '"]';
+        var ph = el.getAttribute('placeholder');
+        if (ph) return el.tagName.toLowerCase() + '[placeholder="' + ph + '"]';
+        return el.tagName.toLowerCase();
+      }
+      function findSubmit(ctx){
+        var btns = ctx.querySelectorAll('button, input[type=submit]');
+        for (var i=0;i<btns.length;i++){
+          var b = btns[i];
+          var isSubmit = (b.tagName==='INPUT' && lower(b.getAttribute('type'))==='submit') ||
+                         (b.tagName==='BUTTON' && lower(b.getAttribute('type'))!=='button');
+          if (isSubmit && hasAny(lower(b.textContent||b.value||''), LOGIN_TXT)) return b;
+        }
+        var all = ctx.querySelectorAll('button');
+        for (var i=0;i<all.length;i++){
+          if (hasAny(lower(all[i].textContent||''), LOGIN_TXT)) return all[i];
+        }
+        var sub = ctx.querySelector('button[type=submit], input[type=submit]');
+        if (sub) return sub;
+        return null;
+      }
+      var submit = findSubmit(scope);
+      if (!submit && scope !== document) submit = findSubmit(document);
+      function btnSel(b){
+        var id = b.getAttribute('id');
+        if (id && /^[A-Za-z][\w\-:]*$/.test(id)) return b.tagName.toLowerCase() + '#' + id;
+        var txt = (b.textContent||b.value||'').trim();
+        var t = lower(b.getAttribute('type'));
+        if (txt){
+          var x = txt.replace(/'/g, "\\'").slice(0, 12);
+          if (t === 'submit') return "//" + b.tagName.toLowerCase() + "[@type='submit' and contains(normalize-space(.), '" + x + "')]";
+          return "//" + b.tagName.toLowerCase() + "[contains(normalize-space(.), '" + x + "')]";
+        }
+        return b.tagName.toLowerCase() + "[type=submit]";
+      }
+      return JSON.stringify({
+        username: username ? cssOf(username) : null,
+        password: cssOf(PW),
+        submit: submit ? btnSel(submit) : null
+      });
+    })()
+    '''
+    try:
+        raw = driver.run_js(js)
+        if not raw:
+            return None
+        data = json.loads(raw)
+        logger.info("自动识别登录字段: username=%s password=%s submit=%s" % (
+            data.get('username'), data.get('password'), data.get('submit')))
+        return data
+    except Exception as e:
+        logger.debug("登录字段自动识别失败: %s" % e)
+        return None
+
+
+def _selector_exists(driver, sel):
+    """判断选择器（支持 CSS 与 XPath，逗号分隔的多个选择器任一命中即可）是否在当前页面真实存在。"""
+    if not sel:
+        return False
+    js = r'''
+    return (function(sel){
+      var list = (sel.trim().indexOf('//') === 0) ? [sel.trim()] : sel.split(',');
+      for (var i=0;i<list.length;i++){
+        var s = list[i].trim();
+        if(!s) continue;
+        try {
+          if (s.indexOf('//') === 0){
+            var r = document.evaluate(s, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+            if (r.singleNodeValue) return true;
+          } else if (document.querySelector(s)) {
+            return true;
+          }
+        } catch(e){}
+      }
+      return false;
+    })(%s)
+    ''' % json.dumps(sel)
+    try:
+        return bool(driver.run_js(js))
+    except Exception:
+        return False
+
+
+def _pick_selector(driver, candidates):
+    """按候选优先级选择第一个在页面真实存在的选择器；兜底返回最后一个候选（填充时安全跳过）。"""
+    for c in candidates:
+        if c and _selector_exists(driver, c):
+            return c
+    return candidates[-1] if candidates else ''
 
 
 def perform_login(driver, site, ocr_config, cf_timeout=0, logger_=logger):
@@ -281,11 +431,11 @@ def perform_login(driver, site, ocr_config, cf_timeout=0, logger_=logger):
         logger_.warning("用户名或密码为空，无法登录")
         return False
 
-    username_sel = site.get('username_selector') or ','.join(DEFAULT_USERNAME_SELECTORS)
-    password_sel = site.get('password_selector') or ','.join(DEFAULT_PASSWORD_SELECTORS)
+    username_cfg = (site.get('username_selector') or '').strip()
+    password_cfg = (site.get('password_selector') or '').strip()
+    submit_cfg = (site.get('submit_selector') or '').strip()
     captcha_img_sel = site.get('captcha_img_selector') or ','.join(DEFAULT_CAPTCHA_IMG_SELECTORS)
     captcha_input_sel = site.get('captcha_input_selector') or ','.join(DEFAULT_CAPTCHA_INPUT_SELECTORS)
-    submit_sel = site.get('submit_selector') or ','.join(DEFAULT_SUBMIT_SELECTORS)
 
     # 如果当前不在登录页，先导航到登录页
     if not is_login_page(driver):
@@ -298,14 +448,24 @@ def perform_login(driver, site, ocr_config, cf_timeout=0, logger_=logger):
                 return False
         time.sleep(2)
 
+    # 通用自适应（自愈式）：
+    #   1) 始终探测真实表单字段；
+    #   2) 用户配置的选择器只要在当前页面真能定位到元素就优先使用（尊重手动配置）；
+    #   3) 配置失效（定位不到）时回退到自动探测，最后回退 DEFAULT_*_SELECTORS（保证原有功能无损）。
+    detected = detect_login_fields(driver) or {}
+    username_sel = _pick_selector(driver, [username_cfg, detected.get('username'), ','.join(DEFAULT_USERNAME_SELECTORS)])
+    password_sel = _pick_selector(driver, [password_cfg, detected.get('password'), ','.join(DEFAULT_PASSWORD_SELECTORS)])
+    submit_sel = _pick_selector(driver, [submit_cfg, detected.get('submit'), ','.join(DEFAULT_SUBMIT_SELECTORS)])
+    logger_.info("登录字段选择器 -> 账号:%s 密码:%s 提交:%s" % (username_sel, password_sel, submit_sel))
+
     js_fill = JS_FILL_TEMPLATE % (
-        username_sel.replace("'", "\\'"), username.replace("'", "\\'"),
-        password_sel.replace("'", "\\'"), password_decrypted.replace("'", "\\'")
+        json.dumps(username_sel), json.dumps(username),
+        json.dumps(password_sel), json.dumps(password_decrypted)
     )
     driver.run_js(js_fill)
 
     if site.get('has_captcha', 0):
-        js_get_src = JS_GET_SRC_TEMPLATE % (captcha_img_sel.replace("'", "\\'"))
+        js_get_src = JS_GET_SRC_TEMPLATE % (json.dumps(captcha_img_sel))
         img_src = driver.run_js(js_get_src)
         if img_src:
             import requests
@@ -318,21 +478,31 @@ def perform_login(driver, site, ocr_config, cf_timeout=0, logger_=logger):
                 ocr_text = ocr_captcha(img_data, ocr_config.get('api_key', ''), ocr_config.get('secret_key', ''))
                 if ocr_text:
                     js_fill_cap = JS_FILL_CAPTCHA_TEMPLATE % (
-                        captcha_input_sel.replace("'", "\\'"), ocr_text.replace("'", "\\'")
+                        json.dumps(captcha_input_sel), json.dumps(ocr_text)
                     )
                     driver.run_js(js_fill_cap)
             except Exception as e:
                 logger_.warning("验证码处理异常: %s" % e)
 
-    js_click = JS_CLICK_TEMPLATE % (submit_sel.replace("'", "\\'"))
+    js_click = JS_CLICK_TEMPLATE % (json.dumps(submit_sel))
     driver.run_js(js_click)
 
+    # 结果判定：离开登录页 / 出现已登录标识 => 成功；出现错误提示 => 提前失败
     max_wait = 30
     start = time.time()
+    logout_kw = ('退出', '登出', 'logout', '安全退出', '欢迎您回来')
     while time.time() - start < max_wait:
+        html = driver.get_page_source() or ''
         if not is_login_page(driver):
-            time.sleep(2)
+            time.sleep(1)
             return True
+        if any(k in html for k in logout_kw):
+            time.sleep(1)
+            return True
+        failed = _login_failed(html)
+        if failed:
+            logger_.warning("登录失败（页面提示：%s）" % failed)
+            return False
         time.sleep(1)
     return False
 
@@ -747,16 +917,20 @@ class BrowserExecutor(BaseExecutor):
             keywords = ctx.success_keywords
             html = self.driver.get_page_source() or ''
             if any(kw in html for kw in keywords):
-                return SignResult(True, '签到成功（检测到标识）', ctx.cookies)
+                ctx.log('签到成功（检测到标识）')
+                return SignResult(True, '签到成功', ctx.cookies)
 
             if click_sign_button(self.driver, site):
                 time.sleep(3)
                 html_after = self.driver.get_page_source() or ''
                 if any(kw in html_after for kw in keywords):
-                    return SignResult(True, '签到成功（点击按钮后）', ctx.cookies)
-                return SignResult(False, '点击后未检测到成功标识', ctx.cookies, html_after[:500])
+                    ctx.log('签到成功（点击按钮后）')
+                    return SignResult(True, '签到成功', ctx.cookies)
+                ctx.log('点击后未检测到成功标识（页面片段：%s）' % ((html_after or '')[:500]))
+                return SignResult(False, '签到失败', ctx.cookies, html_after[:500])
 
-            return SignResult(False, '未找到签到按钮且无成功标识', ctx.cookies)
+            ctx.log('未找到签到按钮且无成功标识')
+            return SignResult(False, '签到失败', ctx.cookies)
         finally:
             if self.driver:
                 try:
@@ -797,7 +971,7 @@ class BrowserExecutor(BaseExecutor):
 
             if is_logged_in(self.driver) and self._page_shows_logout(self.driver):
                 ctx.set_cookies(self.driver.get_cookies())
-                self._remember_ua(ctx, self.driver)
+                self._capture_browser_headers(ctx, self.driver)
                 return True, '已登录，Cookie刷新成功'
 
             # Cookie无效（页面无「退出」标识，可能只是游客页面被关键词误判）
@@ -810,10 +984,17 @@ class BrowserExecutor(BaseExecutor):
 
             time.sleep(1)
             ctx.set_cookies(self.driver.get_cookies())
-            self._remember_ua(ctx, self.driver)
+            self._capture_browser_headers(ctx, self.driver)
             return True, '浏览器登录成功，Cookie已刷新'
         except Exception as e:
             return False, '刷新Cookie异常: %s' % e
+        finally:
+            if self.driver:
+                try:
+                    self.driver.close()
+                except Exception:
+                    pass
+                self.driver = None
 
     @staticmethod
     def _page_shows_logout(driver):
@@ -823,18 +1004,39 @@ class BrowserExecutor(BaseExecutor):
         return any(kw in html for kw in ('退出', '登出', 'logout', '安全退出', '欢迎您回来'))
 
     @staticmethod
-    def _remember_ua(ctx, driver):
+    def _capture_browser_headers(ctx, driver):
         """
-        记录浏览器实际UA到变量池 {{ua}}。
-        部分站点(WAF)会校验Cookie与UA的对应关系，后续API请求应使用同一UA。
+        登录成功后提取浏览器真实请求头（UA / Accept / Accept-Language / Referer），
+        写入 ctx.browser_headers 并把 UA 同步到变量池 {{ua}}。
+        浏览器登录+API签到 模式下，API 接口请求会统一使用这些头，
+        避免 WAF 校验「Cookie 与请求头不匹配」导致签到失败。
         """
+        headers = {}
         try:
-            ua = getattr(driver.page, 'user_agent', '') or ''
+            info = driver.run_js(r'''
+            return (function(){
+              return JSON.stringify({ ua: navigator.userAgent, lang: navigator.language });
+            })();
+            ''')
+            data = json.loads(info) if info else {}
+            ua = (data.get('ua') or getattr(driver.page, 'user_agent', '') or '').strip()
             if ua:
+                headers['User-Agent'] = ua
                 ctx.vars['ua'] = ua
-                ctx.log('记录浏览器UA供接口请求使用(%s...)' % ua[:40])
+            lang = (data.get('lang') or '').strip()
+            if lang:
+                headers['Accept-Language'] = lang if ',' in lang else (lang + ',*;q=0.8')
+            url = driver.get_current_url() or ''
+            if url:
+                headers['Referer'] = url
+            headers['Accept'] = ('text/html,application/xhtml+xml,application/xml;q=0.9,'
+                                 'image/avif,image/webp,image/apng,*/*;q=0.8')
+            if headers:
+                ctx.browser_headers = headers
+                ctx.log('记录浏览器请求头供API签到统一使用: %s'
+                        % ', '.join('%s=%s' % (k, str(v)[:40]) for k, v in headers.items()))
         except Exception as e:
-            logger.debug('记录UA失败: %s' % e)
+            logger.debug('提取浏览器请求头失败: %s' % e)
 
     def _scroll_page(self):
         """页面上下滚动，触发懒加载元素"""

@@ -10,7 +10,8 @@ from flask import Flask, flash, render_template, request, redirect, url_for, Res
 from werkzeug.security import generate_password_hash, check_password_hash
 from models import (init_db, get_all_sites, get_site, add_site, update_site, delete_site, get_config, set_config,
                     get_all_configs, get_recent_sign_logs, get_all_sign_times, add_sign_time,
-                    update_sign_time, delete_sign_time, get_sign_time, update_site_cookies)
+                    update_sign_time, delete_sign_time, get_sign_time, update_site_cookies,
+                    update_site_token_store)
 from scheduler import start_scheduler, stop_scheduler, restart_scheduler
 from sign_service import run_single_sign
 from utils import (parse_cookies_input, encrypt_data, decrypt_data, normalize_cookies, get_encryption_key_info,
@@ -222,9 +223,38 @@ def _render_form(site, cookies_text, form=None):
     if api_config_json is None:
         api_config_json = site.get('api_config') or ''
 
+    # 浏览器登录阶段提取的请求头（只读展示，plain JSON）
+    browser_headers_text = ''
+    headers_raw = site.get('headers') if isinstance(site, dict) else None
+    if headers_raw:
+        try:
+            hd = json.loads(headers_raw)
+            if isinstance(hd, dict):
+                browser_headers_text = '\n'.join('%s: %s' % (k, v) for k, v in hd.items())
+        except Exception:
+            pass
+
+    # Buddy 令牌式站点：令牌存储只读展示（解密后明文，便于复制/核对）
+    token_store_text = ''
+    token_raw = site.get('token_store') if isinstance(site, dict) else None
+    if token_raw:
+        try:
+            dec = decrypt_data(token_raw)
+            if dec:
+                token_store_text = dec
+        except Exception:
+            pass
+
+    # Buddy 模式字段回显（api_config 里存了 auth_file/api_bases/domain）
+    values['buddy_auth_file'] = cfg.get('auth_file') or ''
+    values['buddy_api_bases'] = ','.join(cfg.get('api_bases') or []) if cfg.get('api_bases') else ''
+    values['buddy_domain'] = cfg.get('domain') or ''
+
     return render_template('add_edit.html', site=site or None, cookies_text=cookies_text,
                            executors=list_executors(), api_editor=api_editor,
                            api_config_json=api_config_json,
+                           browser_headers_text=browser_headers_text,
+                           token_store_text=token_store_text,
                            v=values, presets=get_presets())
 
 
@@ -345,6 +375,41 @@ def _build_api_config(form):
     return json.dumps(cfg, ensure_ascii=False)
 
 
+def _build_buddy_config(form):
+    """组装 Buddy 令牌式站点的 api_config（auth_file / api_bases / domain）JSON 字符串"""
+    auth_file = (form.get('buddy_auth_file') or '').strip()
+    api_bases_raw = (form.get('buddy_api_bases') or '').strip()
+    domain = (form.get('buddy_domain') or '').strip()
+    cfg = {}
+    if auth_file:
+        cfg['auth_file'] = auth_file
+    if api_bases_raw:
+        cfg['api_bases'] = [b.strip() for b in api_bases_raw.split(',') if b.strip()]
+    if domain:
+        cfg['domain'] = domain
+    return json.dumps(cfg, ensure_ascii=False) if cfg else ''
+
+
+def _handle_token_store_form(sid, raw):
+    """校验并保存「令牌」框内容；返回错误字符串或 None（保存成功/无需保存）"""
+    raw = (raw or '').strip()
+    if not raw:
+        return None
+    try:
+        store = json.loads(raw)
+        if not isinstance(store, dict):
+            return '令牌格式错误：必须是 JSON 对象'
+        if not store.get('access_token'):
+            return '令牌格式错误：缺少 access_token 字段'
+    except Exception as e:
+        return '令牌格式错误：%s' % e
+    try:
+        update_site_token_store(sid, encrypt_data(json.dumps(store, ensure_ascii=False)))
+    except Exception as e:
+        return '令牌保存失败：%s' % e
+    return None
+
+
 def _build_success_rule(form, prefix='success_'):
     """组装 success_rule（或登录接口的 success_rule）JSON 字符串。
     prefix 用于区分签到判定(success_)与登录判定(login_success_)。"""
@@ -404,7 +469,7 @@ def _collect_site_form(form):
         'sign_button_selector': (form.get('sign_button_selector') or '').strip(),
         'login_first': 1 if form.get('login_first') else 0,
         'mode': mode,
-        'api_config': _build_api_config(form),
+        'api_config': _build_api_config(form) if mode != 'buddy' else _build_buddy_config(form),
         'success_rule': _to_json_str(_build_success_rule(form))
     }
 
@@ -519,6 +584,13 @@ def add():
             data['cookies'] = None
         try:
             new_id = add_site(data)
+            # Buddy 令牌式站点：处理「令牌」框（粘贴 token_store，仅 buddy 模式用到）
+            token_err = _handle_token_store_form(new_id, request.form.get('token_store', ''))
+            if token_err:
+                flash(token_err, 'danger')
+                site_display = dict(get_site(new_id))
+                site_display['password'] = ''
+                return _render_form(site_display, '', request.form)
             flash(f'站点「{data["name"]}」添加成功 (ID: {new_id})', 'success')
             if request.form.get('save_then_sniff'):
                 return redirect(url_for('edit', sid=new_id, sniff=1))
@@ -582,6 +654,17 @@ def edit(sid):
         data['cookies'] = encrypted_cookies
         try:
             update_site(sid, data)
+            # Buddy 令牌式站点：处理「令牌」框（空=清空，粘贴=更新）
+            token_raw = request.form.get('token_store', '').strip()
+            if not token_raw:
+                update_site_token_store(sid, None)
+            else:
+                token_err = _handle_token_store_form(sid, token_raw)
+                if token_err:
+                    flash(token_err, 'danger')
+                    site_display = dict(site)
+                    site_display['password'] = ''
+                    return _render_form(site_display, new_cookies_raw, request.form)
             flash(f'站点「{data["name"]}」更新成功', 'success')
             if request.form.get('save_then_sniff'):
                 return redirect(url_for('edit', sid=sid, sniff=1))

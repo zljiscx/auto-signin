@@ -241,6 +241,7 @@
                         <span style="color:#909399; font-weight:normal;">（每行一个，格式 Name: value；可用 {% raw %}{{cookie}}{% endraw %} 自动带入Cookie）</span>
                     </label>
                     <textarea name="api_headers" rows="4" placeholder="User-Agent: Mozilla/5.0&#10;Cookie: {% raw %}{{cookie}}{% endraw %}">{{ v.api_headers }}</textarea>
+                    <div class="form-tip">只需填站点 API 需要的<b>业务头</b>（如 Authorization / X-Token）。浏览器登录自动提取的 User-Agent / Referer / Accept 会作为<b>默认值</b>自动附加（页面下方「浏览器请求头」只读框可见），此处写的同名头会覆盖它。</div>
                 </div>
 
                 <div class="form-row">
@@ -435,10 +436,53 @@
             </div>
         </div>
 
+        <!-- ============ Buddy 令牌式签到字段 ============ -->
+        <div id="secBuddy" style="display: none;">
+            <div class="section-title">Buddy 令牌设置（Buddy令牌签到模式）</div>
+            <div class="form-group">
+                <label style="display: block; margin-bottom: 7px; font-weight: bold;">令牌（Token）：
+                    <span style="color: #909399; font-weight: normal;">从 Windows 端 buddy_auth.py 导出的 token_store JSON（含 access_token/refresh_token 等），粘贴一次即可；续期会自动回写</span></label>
+                <textarea name="token_store" rows="6" placeholder='{"access_token":"...","refresh_token":"...","domain":"...","uid":"...","username":"...","expires_at":...}'>{{ token_store_text }}</textarea>
+                <div class="form-tip">NAS/Docker 端：把 Windows 导出的 token_store 粘进来一次，后续续期自动滚动，无需再手动复制。本机（Windows）也可留空，程序会自动读取 WorkBuddy 登录态文件。</div>
+            </div>
+            <div class="form-row">
+                <div class="form-group" style="max-width: 420px;">
+                    <div class="form-item-row">
+                        <label>授权文件：</label>
+                        <input type="text" name="buddy_auth_file" value="{{ v.buddy_auth_file if v else '' }}" placeholder="留空=默认 WorkBuddy 登录态文件路径">
+                    </div>
+                    <div class="form-tip">Windows 桌面登录态文件 workbuddy-desktop.info 的路径；留空用默认位置</div>
+                </div>
+                <div class="form-group">
+                    <div class="form-item-row">
+                        <label>API域名：</label>
+                        <input type="text" name="buddy_api_bases" value="{{ v.buddy_api_bases if v else '' }}" placeholder="https://copilot.tencent.com,https://www.codebuddy.cn">
+                    </div>
+                    <div class="form-tip">逗号分隔的 API 基址，留空用默认值</div>
+                </div>
+            </div>
+            <div class="form-group">
+                <div class="form-item-row">
+                    <label>默认Domain：</label>
+                    <input type="text" name="buddy_domain" value="{{ v.buddy_domain if v else '' }}" placeholder="www.workbuddy.cn">
+                </div>
+            </div>
+        </div>
+
         <!-- ============ 共用：Cookies ============ -->
         <div class="form-group" style="margin-top: 18px;">
             <label style="display: block; margin-bottom: 7px; font-weight: bold;">Cookies： <span style="color: #909399; font-weight: normal;">（支持JSON数组、name=value格式；留空则用账号密码登录）</span></label>
             <textarea name="cookies" rows="4" placeholder='[{"name":"uid","value":"123"}]'>{{ cookies_text }}</textarea>
+        </div>
+
+        <!-- ============ 共用：浏览器请求头（只读，自动提取） ============ -->
+        <div class="form-group" style="margin-top: 12px;">
+            <label style="display: block; margin-bottom: 7px; font-weight: bold;">浏览器请求头（自动提取，只读）： <span style="color: #909399; font-weight: normal;">浏览器登录成功后记录 User-Agent/Accept/Referer 等，供 API 签到统一使用；下次纯 API 签到也会复用</span></label>
+            {% if browser_headers_text %}
+            <textarea rows="4" readonly style="background:#f5f7fa; color:#606266; font-family: monospace;">{{ browser_headers_text }}</textarea>
+            {% else %}
+            <div class="form-tip">暂无记录（完成一次浏览器登录后将自动生成）</div>
+            {% endif %}
         </div>
 
         <!-- ============ 高级设置 ============ -->
@@ -558,8 +602,10 @@
         var isBrowser = (m === 'browser' || m === 'browser_api');
         // api / browser_api 都需要 API 接口配置（browser_api 用浏览器登录、API签到）
         var hasApi = (m === 'api' || m === 'browser_api');
+        var isBuddy = (m === 'buddy');
         document.getElementById('secBrowser').style.display = isBrowser ? '' : 'none';
         document.getElementById('secApi').style.display = hasApi ? '' : 'none';
+        document.getElementById('secBuddy').style.display = isBuddy ? '' : 'none';
         document.getElementById('advBrowser').style.display = isBrowser ? '' : 'none';
         refreshLoginSection();
         var signUrl = document.getElementById('signUrl');

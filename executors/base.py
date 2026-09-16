@@ -62,6 +62,8 @@ class SignContext(object):
         self.start_time = time.time()
         self.vars = {}                  # 变量池：供 API 模式多步请求之间传递数据
         self.cookies_changed = False    # 本次执行中Cookie是否被刷新过
+        self.browser_headers = self._load_browser_headers()  # 浏览器登录提取的请求头：优先用持久化的，供 API 签到统一使用
+        self.token_store = self._load_token_store()  # Buddy 等令牌式站点：持久化的令牌存储（含 access/refresh_token），解密后为 dict
         self._logs = []
 
         # ---- 解密后的凭据 ----
@@ -113,6 +115,36 @@ class SignContext(object):
 
     def set_cookies(self, cookies_list):
         self.cookies = filter_cookies(cookies_list)
+
+    def _load_browser_headers(self):
+        """从站点持久化的 headers 字段加载浏览器请求头（JSON字符串）"""
+        raw = self.site.get('headers')
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items()}
+        except Exception as e:
+            self.log('解析站点请求头失败: %s' % e, 'warning')
+        return {}
+
+    def _load_token_store(self):
+        """从站点持久化的 token_store 字段加载令牌存储（解密后的 dict）。
+        Buddy 等令牌式签到会把 access_token/refresh_token/domain/uid 等存这里。"""
+        raw = self.site.get('token_store')
+        if not raw:
+            return {}
+        try:
+            decrypted = decrypt_data(raw)
+            if not decrypted:
+                return {}
+            data = json.loads(decrypted)
+            if isinstance(data, dict):
+                return data
+        except Exception as e:
+            self.log('解析站点令牌存储失败: %s' % e, 'warning')
+        return {}
 
     # ---------- 日志 ----------
     def log(self, message, level='info'):

@@ -4,7 +4,8 @@ import logging
 import time
 from datetime import datetime
 from models import (get_site, get_all_sites, get_all_configs, add_sign_log,
-                    update_site_cookies_and_result, update_site_sign_result)
+                    update_site_cookies_and_result, update_site_sign_result,
+                    update_site_browser_headers)
 from utils import decrypt_data, encrypt_data, send_wecom_text_message
 from executors import SignContext, get_executor, get_mode_label
 
@@ -73,6 +74,14 @@ def sign_site(site, ocr_config, retry_times=3, is_manual=False):
                 update_site_sign_result(sid, success)
         except Exception as e:
             logger.warning('回写签到结果失败: %s' % e)
+
+        # 浏览器登录阶段提取的请求头与签到成功与否无关，单独写回站点，
+        # 保证下次纯 API 模式（已有 Cookie、跳过浏览器）也能复用统一请求头
+        if ctx.browser_headers:
+            try:
+                update_site_browser_headers(sid, json.dumps(ctx.browser_headers, ensure_ascii=False))
+            except Exception as e:
+                logger.warning('回写浏览器请求头失败: %s' % e)
 
     except Exception as e:
         msg = f"致命异常: {str(e)}"

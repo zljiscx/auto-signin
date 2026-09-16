@@ -12,11 +12,13 @@ from .base import (
     register_executor, get_executor, list_executors, get_mode_label, filter_cookies
 )
 from .api import ApiExecutor, BrowserApiExecutor, normalize_api_config, build_config_from_curl
+from .buddy import BuddyExecutor
 
 __all__ = [
     'BaseExecutor', 'SignContext', 'SignResult', 'register_executor',
     'get_executor', 'list_executors', 'get_mode_label', 'filter_cookies',
     'ApiExecutor', 'BrowserApiExecutor', 'normalize_api_config', 'build_config_from_curl',
+    'BuddyExecutor',
 ]
 
 logger = logging.getLogger(__name__)

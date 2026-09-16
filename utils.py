@@ -34,6 +34,16 @@ DEFAULT_SIGN_BUTTON_SELECTORS = [
 
 # ---------- JavaScript 模板常量 ----------
 JS_FILL_TEMPLATE = """
+function setNativeValue(el, value) {
+    // 兼容 React/Vue 等受控组件：直接 el.value= 不会更新框架内部状态，
+    // 必须用原型上的原生 setter 再派发 input/change 事件，登录才会带上真实值
+    var proto = (el.tagName === 'TEXTAREA') ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+    var desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc && desc.set) { desc.set.call(el, value); }
+    else { el.value = value; }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+}
 function fillElement(selector, value) {
     var el = null;
     if (selector.startsWith('//')) {
@@ -42,15 +52,11 @@ function fillElement(selector, value) {
     } else {
         el = document.querySelector(selector);
     }
-    if (el) {
-        el.value = value;
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-    }
+    if (el) { setNativeValue(el, value); }
     return el !== null;
 }
-fillElement('%s', '%s');
-fillElement('%s', '%s');
+fillElement(%s, %s);
+fillElement(%s, %s);
 """
 
 JS_GET_SRC_TEMPLATE = """
@@ -64,10 +70,18 @@ function getElementSrc(selector) {
     }
     return el ? el.src : null;
 }
-return getElementSrc('%s');
+return getElementSrc(%s);
 """
 
 JS_FILL_CAPTCHA_TEMPLATE = """
+function setNativeValue(el, value) {
+    var proto = (el.tagName === 'TEXTAREA') ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+    var desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc && desc.set) { desc.set.call(el, value); }
+    else { el.value = value; }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+}
 function fillCaptcha(selector, value) {
     var el = null;
     if (selector.startsWith('//')) {
@@ -76,13 +90,9 @@ function fillCaptcha(selector, value) {
     } else {
         el = document.querySelector(selector);
     }
-    if (el) {
-        el.value = value;
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-    }
+    if (el) { setNativeValue(el, value); }
 }
-fillCaptcha('%s', '%s');
+fillCaptcha(%s, %s);
 """
 
 JS_CLICK_TEMPLATE = """
@@ -100,7 +110,7 @@ function clickElement(selector) {
     }
     return false;
 }
-return clickElement('%s');
+return clickElement(%s);
 """
 
 # ---------- 加密 ----------

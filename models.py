@@ -52,6 +52,13 @@ def init_db():
         _add_column_if_not_exists(conn, 'sites', 'api_config', 'TEXT')
         # success_rule: 签到成功判定规则(JSON字符串)，不配置时使用内置关键词
         _add_column_if_not_exists(conn, 'sites', 'success_rule', 'TEXT')
+        # headers: 浏览器登录阶段提取的请求头(JSON字符串)，供 API 签到统一使用，
+        #          避免纯 API 模式（已有 Cookie、跳过浏览器）时请求头与 Cookie 不匹配
+        _add_column_if_not_exists(conn, 'sites', 'headers', 'TEXT')
+        # token_store: 令牌式站点（如 Buddy加油站）的令牌存储(JSON字符串，加密)，
+        #              含 access_token/refresh_token/domain/uid/username/expires_at/last_refresh_date，
+        #              续期后回写以实现「一次读取永久登录」
+        _add_column_if_not_exists(conn, 'sites', 'token_store', 'TEXT')
         # 清理已废弃的浏览器接管字段（该方案需保持浏览器常开，已移除）
         try:
             conn.execute('ALTER TABLE sites DROP COLUMN browser_address')
@@ -212,6 +219,18 @@ def update_site_cookies_and_result(sid, cookies_json, success, time_str=None):
             time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         conn.execute('UPDATE sites SET cookies=?, last_sign_time=?, sign_success=? WHERE id=?',
                      (cookies_json, time_str, 1 if success else 0, sid))
+        conn.commit()
+
+def update_site_browser_headers(sid, headers_json):
+    """写回浏览器登录阶段提取的请求头（JSON字符串），供后续纯API签到复用"""
+    with get_db() as conn:
+        conn.execute('UPDATE sites SET headers=? WHERE id=?', (headers_json, sid))
+        conn.commit()
+
+def update_site_token_store(sid, token_json_enc):
+    """写回令牌式站点的令牌存储（加密后的JSON字符串）；token_json_enc 为 None 表示清空"""
+    with get_db() as conn:
+        conn.execute('UPDATE sites SET token_store=? WHERE id=?', (token_json_enc, sid))
         conn.commit()
 
 # ---------- 签到日志 ----------

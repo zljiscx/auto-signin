@@ -234,7 +234,7 @@ class ApiExecutor(BaseExecutor):
                         step, timeout, follow_redirect, verify_ssl, use_site_cookies)
                 except Exception as e:
                     ctx.log('步骤「%s」请求异常: %s' % (name, e), 'error')
-                    return SignResult(False, '步骤「%s」请求失败：%s' % (name, e), ctx.cookies)
+                    return SignResult(False, '签到失败', ctx.cookies)
 
                 last_status, last_text, last_headers = status, text, headers
                 ctx.log('步骤「%s」完成，HTTP %s，响应长度 %s' % (name, status, len(text or '')))
@@ -267,9 +267,8 @@ class ApiExecutor(BaseExecutor):
                            'cf_chl_opt', 'checking your browser')
         if (low_headers.get('cf-mitigated') == 'challenge'
                 or any(m in (last_text or '').lower() for m in cf_page_markers)):
-            return SignResult(False, '请求被Cloudflare拦截（返回人机验证页）。'
-                                     '该站点开启了CF人机验证，API模式无法通过，'
-                                     '请改用浏览器模式或放弃自动签到', ctx.cookies)
+            ctx.log('请求被Cloudflare拦截（返回人机验证页），该站点开启CF人机验证，API模式无法通过，请改用浏览器模式或放弃自动签到')
+            return SignResult(False, '签到失败', ctx.cookies)
 
         # 判定
         rule = ctx.success_rule or {}
@@ -285,7 +284,9 @@ class ApiExecutor(BaseExecutor):
             snippet = ' '.join(snippet_src.split())[:200]
             if snippet:
                 message += '（响应片段：%s）' % snippet
-        return SignResult(ok, message, ctx.cookies, (last_text or '')[:500])
+        # 推送只发结果（签到成功/签到失败），判定细节写入日志
+        ctx.log('API 签到判定: ' + message)
+        return SignResult(ok, '签到成功' if ok else '签到失败', ctx.cookies, (last_text or '')[:500])
 
     # ---------- 内部实现 ----------
     def _do_request(self, step, timeout, follow_redirect, verify_ssl, use_site_cookies):
@@ -300,6 +301,12 @@ class ApiExecutor(BaseExecutor):
         headers = {k: v for k, v in headers.items()
                    if str(k).lower() not in ('content-length', 'accept-encoding')}
 
+        # 浏览器登录阶段提取的请求头作为默认值合并（不覆盖步骤显式配置），
+        # 让 API 接口请求与浏览器保持一致的 UA/Accept/Referer 等，规避 WAF 拦截
+        for hk, hv in (ctx.browser_headers or {}).items():
+            if not any(str(k).lower() == str(hk).lower() for k in headers):
+                headers[str(hk)] = hv
+
         if use_site_cookies and ctx.cookies:
             if not any(str(k).lower() == 'cookie' for k in headers):
                 headers['Cookie'] = ctx.cookie_string
@@ -312,8 +319,11 @@ class ApiExecutor(BaseExecutor):
                     pass
 
         ua_key = next((k for k in headers if str(k).lower() == 'user-agent'), None)
-        if ua_key is None or not str(headers[ua_key]).strip():
-            # 未配置或{{ua}}无值（未开启浏览器刷新Cookie）时使用默认UA
+        ua_val = str(headers[ua_key]).strip() if ua_key else ''
+        # 步骤里若写成 {{ua}} 但变量池为空（未开浏览器刷新Cookie），回退浏览器UA/默认UA
+        if '{{ua}}' in ua_val:
+            ua_val = ctx.vars.get('ua') or ''
+        if not ua_val:
             if ua_key is not None:
                 del headers[ua_key]
             headers['User-Agent'] = DEFAULT_UA
