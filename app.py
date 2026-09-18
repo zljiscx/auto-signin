@@ -13,7 +13,7 @@ from models import (init_db, get_all_sites, get_site, add_site, update_site, del
                     update_sign_time, delete_sign_time, get_sign_time, update_site_cookies,
                     update_site_token_store, update_site_browser_headers)
 from scheduler import start_scheduler, stop_scheduler, restart_scheduler
-from sign_service import run_single_sign
+from sign_service import run_single_sign, run_startup_makeup
 from utils import (parse_cookies_input, encrypt_data, decrypt_data, normalize_cookies, get_encryption_key_info,
                    set_encryption_key_file, parse_curl, parse_har)
 from executors import list_executors, get_mode_label, normalize_api_config, SignContext
@@ -30,6 +30,9 @@ init_db()
 # 启动调度器
 if os.environ.get('WERKZEUG_RUN_MAIN') == 'true' or not app.debug:
     start_scheduler()
+    # 启动自检补救：今天已过去的签到时间点若当天没执行过，则补执行一次
+    # （应对 NAS 关机/开机故障导致错过定时签到的情况）
+    run_startup_makeup()
 
 
 # ---------- 管理员密码相关 ----------

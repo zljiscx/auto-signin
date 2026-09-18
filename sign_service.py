@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 from models import (get_site, get_all_sites, get_all_configs, add_sign_log,
                     update_site_cookies_and_result, update_site_sign_result,
-                    update_site_browser_headers)
+                    update_site_browser_headers, get_all_sign_times, get_db)
 from utils import decrypt_data, encrypt_data, send_wecom_text_message
 from executors import SignContext, get_executor, get_mode_label
 
@@ -176,7 +176,7 @@ def run_all_scheduled_sign():
         # 推送结果
         if results and webhook_key:
             now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            summary = f"【自动签到结果】\n时间：{now}\n本次执行 {len(sites)} 个站点，跳过 {skip_count} 个已成功站点\n\n" + "\n".join(results)
+            summary = f"【自动签到结果】\n时间：{now}\n执行 {len(sites)} 个未签，跳过 {skip_count} 个已签\n\n" + "\n".join(results)
             # Buddy 等附加信息块统一追加在所有站点结果之后，与前文空一行
             if appendices:
                 summary += "\n\n" + "\n\n".join(appendices)
@@ -186,3 +186,73 @@ def run_all_scheduled_sign():
     finally:
         _sign_lock.release()
         logger.info("定时签到任务结束")
+
+
+# ==================== 启动自检补救 ====================
+# 补执行前的等待秒数：NAS 刚开机时系统时钟可能尚未完成 NTP 同步（而判定完全依赖「今天」），
+# 网络/DNS 也可能未就绪，留出缓冲再执行更稳妥。
+MAKEUP_DELAY_SEC = 60
+
+
+def _last_past_sign_time_today():
+    """今天已过去的最晚一个签到时间点（datetime）；没有则返回 None。
+
+    关键点：所有签到时间一律拼「今天」的日期来构造，因此天然不跨天。
+    例如早上 7 点开机时，今天的时间点都还没到（返回 None），不会去检查昨晚那次。
+    """
+    now = datetime.now()
+    today_str = now.strftime('%Y-%m-%d')
+    latest = None
+    for t in get_all_sign_times() or []:
+        if t.get('enabled', 1) != 1:
+            continue
+        try:
+            tt = datetime.strptime('%s %s' % (today_str, t['time_str']), '%Y-%m-%d %H:%M')
+        except Exception:
+            continue
+        if tt < now and (latest is None or tt > latest):
+            latest = tt
+    return latest
+
+
+def _auto_sign_executed_since(since_dt):
+    """since_dt 之后是否已有自动签到记录（说明那次定时签到确实执行过）。"""
+    since_str = since_dt.strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM sign_logs WHERE is_manual=0 AND sign_time >= ?",
+                (since_str,)
+            ).fetchone()
+        return bool(row and row['cnt'] > 0)
+    except Exception as e:
+        logger.warning('查询签到日志失败: %s' % e)
+        return False
+
+
+def run_startup_makeup(delay_sec=MAKEUP_DELAY_SEC):
+    """启动时自检补救（仅在程序启动时调用一次）。
+
+    今天已过去的最后一个签到时间点若没执行过，就补执行一次。
+    重复签到由 run_all_scheduled_sign 内部「今日已成功站点跳过」天然拦住，
+    因此同一天多次重启也不会重复签到；全部跳过时该函数直接返回、不推送。
+    """
+    try:
+        target = _last_past_sign_time_today()
+        if target is None:
+            logger.info("启动自检：今天还没有已过去的签到时间点，无需补救")
+            return
+        if _auto_sign_executed_since(target):
+            logger.info("启动自检：%s 的定时签到今天已执行，忽略" % target.strftime('%H:%M'))
+            return
+        logger.info("启动自检：%s 的定时签到今天未执行，%d 秒后补救执行一次"
+                    % (target.strftime('%H:%M'), delay_sec))
+
+        def _worker():
+            time.sleep(delay_sec)
+            logger.info("启动自检补救：开始补执行（原定 %s）" % target.strftime('%H:%M'))
+            run_all_scheduled_sign()
+
+        threading.Thread(target=_worker, name='startup-makeup', daemon=True).start()
+    except Exception as e:
+        logger.error("启动自检补救异常: %s" % e)
