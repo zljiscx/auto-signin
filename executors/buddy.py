@@ -10,8 +10,11 @@ Buddy 令牌式签到执行器（mode='buddy'）
 - 续期：POST /v2/plugin/auth/token/refresh（网关代持 client_secret，只需 refresh_token）
         成功会轮换 access_token 与 refresh_token，必须回写才能实现「一次读取永久登录」
 - 签到：POST /v2/billing/meter/daily-checkin
-- 状态：GET  /v2/billing/meter/checkin-activity-status
+- 状态：POST /v2/billing/meter/checkin-activity-status
 - 成功判定：code==0 签到成功；code==10001 或 msg 含「已签到」视为今日已签
+- 对话（连续登录记账信号，整合自 buddy_cloud_chat.py）：每日自动发一条真实提问，
+        会话复用 + chat_request_send 上报 + ACP 发问（失败回退 chat/completions），
+        成功后把 last_chat_date 记入令牌存储，后续兜底运行凭此跳过
 
 令牌来源（按优先级）：
 1. 站点持久化的 token_store（NAS/Docker 端由用户在「令牌」框粘贴一次）
@@ -20,12 +23,15 @@ Buddy 令牌式签到执行器（mode='buddy'）
 """
 import json
 import os
+import re
 import time
+import uuid
 import datetime
 import base64
 import logging
 
 import requests
+from urllib.parse import urlparse
 
 from utils import encrypt_data
 from .base import BaseExecutor, SignResult, register_executor
@@ -35,6 +41,20 @@ logger = logging.getLogger(__name__)
 ENDPOINT_CHECKIN = "/v2/billing/meter/daily-checkin"
 ENDPOINT_STATUS = "/v2/billing/meter/checkin-activity-status"
 ENDPOINT_REFRESH = "/v2/plugin/auth/token/refresh"  # 插件网关续期（网关代持 client_secret，无需密钥）
+# ---- 对话（连续登录记账信号）----
+ENDPOINT_CONV = "/v2/as/conversations/"
+ENDPOINT_SESSION = "/console/as/conversations/%s/session"
+ENDPOINT_REPORT = "/v2/report"
+ENDPOINT_CHAT = "/v2/chat/completions"
+
+MODEL_NAMES = {"hy3": "Hy3", "fast-model": "Fast"}
+# 对话默认配置：每天一条真实提问（可被站点 api_config 的 chat 子对象覆盖）
+DEFAULT_CHAT = {
+    "enabled": True,
+    "model": "hy3",
+    "prompt": "你好，请只回复一个字：好",
+    "timeout": 90,
+}
 
 DEFAULT_API_BASES = ["https://copilot.tencent.com", "https://www.codebuddy.cn"]
 DEFAULT_AUTH_REL_PATH = os.path.join(
@@ -87,6 +107,7 @@ class BuddyExecutor(BaseExecutor):
         self.timeout = int(cfg.get('timeout') or 20)
         self.domain_cfg = (cfg.get('domain') or '').strip()
         self.auth_file_cfg = (cfg.get('auth_file') or '').strip()
+        self.chat_cfg = self._load_chat_cfg(cfg.get('chat'))
 
     def run(self):
         ctx = self.ctx
@@ -131,6 +152,11 @@ class BuddyExecutor(BaseExecutor):
                 parts.append("累计=%s" % total)
             if parts:
                 ctx.log('Buddy 签到汇总: ' + ' '.join(parts))
+        # 对话（连续登录记账信号）：当日首次成功后记录到令牌存储，后续兜底运行凭此跳过
+        chat_note = ''
+        if self._chat_enabled():
+            chat_note = self._run_chat_once(token, uid, nickname, domain, store)
+
         # 拼接待追加到推送末尾的 Buddy 状态块（与前面的站点结果空一行）
         exp_date = (time.strftime("%Y-%m-%d", time.localtime(exp_ms / 1000))
                     if exp_ms else "")
@@ -143,6 +169,8 @@ class BuddyExecutor(BaseExecutor):
             buddy_lines.append("  累计积分：%s" % total)
         if exp_date:
             buddy_lines.append("  已续期至：%s" % exp_date)
+        if chat_note:
+            buddy_lines.append("  每日登录：%s" % chat_note)
         appendix = "\n".join(buddy_lines) if len(buddy_lines) > 1 else ""
         detail = json.dumps(checkin_data, ensure_ascii=False)[:500] if checkin_data else ""
         msg = '今日已签到' if status == 'already' else '签到成功'
@@ -302,6 +330,303 @@ class BuddyExecutor(BaseExecutor):
                 return {}
         return {}
 
+    # ---------- 每日对话（连续登录记账信号，整合自 buddy_cloud_chat.py） ----------
+    def _load_chat_cfg(self, override):
+        """对话配置：默认 + 站点覆盖（空值不覆盖）。override 来自站点 api_config 的 chat 子对象。"""
+        c = dict(DEFAULT_CHAT)
+        if isinstance(override, dict):
+            c.update({k: v for k, v in override.items() if v not in (None, "")})
+        return c
+
+    def _chat_enabled(self):
+        return bool(self.chat_cfg.get("enabled", True))
+
+    def _run_chat_once(self, token, uid, nickname, domain, store):
+        """每日一次真实对话（连续登录记账信号）。已完成则跳过。返回 '完成' / '失败' / ''（禁用）。"""
+        if not self._chat_enabled():
+            return ''
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        state = dict(store.get("chat_state") or {})
+        # 手动执行模式忽略「今日已完成」记录，强制重跑对话以便测试
+        if state.get("last_chat_date") == today and not self.ctx.is_manual:
+            self.ctx.log('Buddy 对话: 今日(%s)已完成，跳过' % today)
+            return '完成'
+        try:
+            ok, line = self._do_chat(token, uid, nickname, domain, store, state, self.chat_cfg)
+        except Exception as e:
+            self.ctx.log('Buddy 对话异常: ' + str(e), 'error')
+            return '失败'
+        self.ctx.log('Buddy 对话: ' + line)
+        return '完成' if ok else '失败'
+
+    def _do_chat(self, token, uid, username, domain, store, state, chat_cfg):
+        """发一条真实提问（会话复用 + 上报 + ACP）。成功则写入当日记录。返回 (ok, 结果行)。"""
+        prompt = chat_cfg.get("prompt") or DEFAULT_CHAT["prompt"]
+        model = chat_cfg.get("model") or "hy3"
+        timeout = int(chat_cfg.get("timeout") or 90)
+        if not state.get("machineId"):
+            state["machineId"] = str(uuid.uuid4())
+        if not state.get("qimei36"):
+            state["qimei36"] = uuid.uuid4().hex + "1a60f"
+
+        cid, stok, link, reused = self._resolve_conversation(token, uid, domain, state)
+        ev = self._build_chat_event(uid, username, model, prompt, state, cid)
+        rst, _ = self._report_chat(token, uid, domain, ev)
+
+        ok, detail = False, "未执行"
+        if cid and stok and link:
+            aok, ares = self._acp_prompt(link, stok, cid, prompt, uid, domain, timeout)
+            if aok:
+                text = self._extract_acp_text(ares)
+                ok = True
+                detail = ("模型=%s 回复：%s" % (model, text[:120])) if text else "ACP 已完成推理"
+            else:
+                self.ctx.log("Buddy 对话 ACP 失败(%s)，回退 chat/completions" % str(ares)[:120], "warning")
+        if not ok:
+            ok, detail = self._chat_completions(token, uid, domain, prompt, model, timeout)
+
+        if ok:
+            state["last_chat_date"] = datetime.datetime.now().strftime("%Y-%m-%d")
+            state["last_chat_time"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            state["last_chat_model"] = model
+        store["chat_state"] = state
+        self._persist_token_store(store)
+
+        line = "成功（%s，会话%s）" % (detail, "复用" if reused else "新建")
+        if not ok:
+            line = "失败：%s" % detail
+        if rst is None:
+            line += " | ⚠️ 上报未送达"
+        return ok, line
+
+    def _resolve_conversation(self, token, uid, domain, state):
+        """优先复用已保存的会话（避免每天新建一堆），拿不到才创建。返回 (cid, tok, link, reused)。
+        原样照搬原版逻辑：遍历所有 api_bases 逐个试会话 GET，某 base 非 200 即换下一个；
+        仅当所有 base 都拿不到 token/link 时才新建。"""
+        old = state.get("conversationId")
+        if old:
+            for base in self.api_bases:
+                st, body = self._call(ENDPOINT_SESSION % old, token, uid, domain, method="GET", base=base)
+                if st == 200:
+                    try:
+                        d = json.loads(body).get("data") or {}
+                        if d.get("token") and d.get("link"):
+                            return old, d["token"], d["link"], True
+                    except Exception:
+                        pass
+        cid, stok, link = self._create_conversation(token, uid, domain)
+        if cid:
+            state["conversationId"] = cid
+        return cid, stok, link, False
+
+    def _create_conversation(self, token, uid, domain):
+        """在服务端创建真实会话，返回 (conversation_id, session_token, acp_link)。"""
+        for base in self.api_bases:
+            st, body = self._call(ENDPOINT_CONV, token, uid, domain, body=b"{}")
+            if st is None:
+                continue
+            try:
+                d = json.loads(body).get("data") or {}
+                sess = d.get("session") or {}
+                if d.get("id") and sess.get("link") and sess.get("token"):
+                    return d["id"], sess["token"], sess["link"]
+            except Exception:
+                pass
+        return None, None, None
+
+    def _report_chat(self, token, uid, domain, ev):
+        """上报 chat_request_send（连续登录的真正记账信号）。返回 (status, code)。"""
+        body = json.dumps([ev], ensure_ascii=False).encode("utf-8")
+        extra = {"X-Product": "SaaS", "X-Requested-With": "WorkBuddy"}
+        st, rbody = self._call(ENDPOINT_REPORT, token, uid, domain, extra, body)
+        code = None
+        if st is not None:
+            try:
+                code = json.loads(rbody).get("code")
+            except Exception:
+                pass
+        return st, code
+
+    def _acp_prompt(self, link, session_token, conv_id, prompt, uid, domain, timeout):
+        """ACP 发一条真实提问：bootstrap 取连接 id，再 session/prompt。返回 (ok, raw_sse)。
+        原样照搬自 buddy_checkin.py（http.client 实现，已验证可用）。"""
+        import http.client
+        import ssl
+        u = urlparse(link)
+        host, base_path = u.hostname, (u.path or "/acp")
+        ctx = ssl.create_default_context()
+        boot = json.dumps({
+            "initialize": {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": 1,
+                "clientCapabilities": {"_meta": {"codebuddy.ai": {"cwd": "/workspace"}},
+                                       "fs": {"readTextFile": False, "writeTextFile": False}}}},
+            "sessionLoad": {"jsonrpc": "2.0", "id": 2, "method": "session/load", "params": {
+                "sessionId": conv_id, "cwd": "/workspace", "mcpServers": [],
+                "_meta": {"codebuddy.ai": {"round": 3}}}},
+        }).encode()
+        hdr = {"Authorization": "Bearer " + (session_token or ""),
+               "Content-Type": "application/json",
+               "Accept": "application/json, text/event-stream",
+               "X-User-Id": uid or "",
+               "X-Domain": domain or DEFAULT_DOMAIN}
+
+        c1 = http.client.HTTPSConnection(host, 443, context=ctx, timeout=timeout)
+        c1.request("POST", base_path + "/bootstrap", body=boot,
+                   headers=dict(hdr, **{"Content-Length": str(len(boot))}))
+        r1 = c1.getresponse()
+        conn_id = r1.getheader("Acp-Connection-Id")
+        if not conn_id:
+            c1.close()
+            return False, "bootstrap 未返回 Acp-Connection-Id"
+
+        p = json.dumps({"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+                        "params": {"sessionId": conv_id,
+                                   "prompt": [{"type": "text", "text": prompt}]}}).encode()
+        c2 = http.client.HTTPSConnection(host, 443, context=ctx, timeout=timeout)
+        c2.request("POST", base_path, body=p,
+                   headers=dict(hdr, **{"Content-Length": str(len(p)),
+                                        "Acp-Connection-Id": conn_id}))
+        r2 = c2.getresponse()
+        if r2.status != 200:
+            err = r2.read(300).decode("utf-8", "replace")
+            c1.close()
+            c2.close()
+            return False, "HTTP %s %s" % (r2.status, err[:120])
+        buf = b""
+        t0 = time.time()
+        try:
+            while time.time() - t0 < timeout:
+                d = r2.read1(1024)
+                if not d:
+                    break
+                buf += d
+                if b"stopReason" in buf or len(buf) > 30000:
+                    break
+        except Exception:
+            pass
+        c1.close()
+        c2.close()
+        return True, buf.decode("utf-8", "replace")
+
+    @staticmethod
+    def _extract_acp_text(raw):
+        """从 ACP 的 SSE 里抽取模型回复文本。原样照搬自 buddy_checkin.py。"""
+        parts = re.findall(r'"text"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
+        return "".join(p.encode().decode("unicode_escape", "replace") for p in parts).strip()
+
+    def _chat_completions(self, token, uid, domain, prompt, model, timeout):
+        """ACP 不可用时的回退：流式 chat/completions。原样照搬自 buddy_checkin.py（urllib 实现）。"""
+        import urllib.request
+        body = json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}],
+                           "stream": True}, ensure_ascii=False).encode("utf-8")
+        last = "无内容返回"
+        for base in self.api_bases:
+            req = urllib.request.Request(base.rstrip("/") + ENDPOINT_CHAT, data=body, method="POST")
+            req.add_header("Authorization", "Bearer " + (token or ""))
+            req.add_header("X-User-Id", uid or "")
+            req.add_header("X-Domain", domain or DEFAULT_DOMAIN)
+            req.add_header("Content-Type", "application/json")
+            req.add_header("Accept", "text/event-stream")
+            req.add_header("User-Agent", "WorkBuddy/5.2.3")
+            try:
+                r = urllib.request.urlopen(req, timeout=timeout)
+            except Exception as e:
+                last = str(e)[:200]
+                continue
+            parts = []
+            try:
+                for raw in r:
+                    s = raw.decode("utf-8", "replace").strip()
+                    if not s.startswith("data:"):
+                        continue
+                    p = s[5:].strip()
+                    if p == "[DONE]":
+                        break
+                    try:
+                        d = json.loads(p)
+                    except Exception:
+                        continue
+                    for ch in (d.get("choices") or []):
+                        c = (ch.get("delta") or {}).get("content")
+                        if c:
+                            parts.append(c)
+            finally:
+                r.close()
+            text = "".join(parts).strip()
+            if text:
+                return True, "模型=%s 回复：%s" % (model, text[:120])
+            last = "无内容返回"
+        return False, last
+
+    @staticmethod
+    def _build_chat_event(uid, username, model, prompt, state, conv_id=None):
+        """照抄 CLI 真实 chat_request_send payload，仅随机化每次调用相关的 ID。"""
+        now = int(time.time() * 1000)
+        conv_id = conv_id or str(uuid.uuid4())
+        req_id = uuid.uuid4().hex
+        return {
+            "eventCode": "chat_request_send",
+            "timestamp": now,
+            "reportDelay": 0,
+            "mode": "craft",
+            "conversationId": conv_id,
+            "requestId": req_id,
+            "inputLength": len(prompt),
+            "requestModelId": model,
+            "requestModelName": MODEL_NAMES.get(model, model),
+            "isPlan": False,
+            "isAutoExecuteTerminal": False,
+            "isAutoModify": False,
+            "codebaseEnable": False,
+            "maxToken": 0,
+            "maxSteps": 500,
+            "temperature": 0,
+            "maxRetries": 0,
+            "mentionContexts": [],
+            "knowledgeId": [],
+            "knowledgeName": [],
+            "codebaseId": "",
+            "mentionContextCount": 0,
+            "command": "",
+            "recommendId": "",
+            "skillId": "",
+            "skillCount": 0,
+            "totalCount": 0,
+            "presentAt": now - 100,
+            "traceId": req_id,
+            "rootRequestId": req_id,
+            "parentConversationId": conv_id,
+            "agentName": "cli",
+            "agentType": "main",
+            "timezone": "Asia/Shanghai",
+            "qimei36": state["qimei36"],
+            "userId": uid,
+            "username": username or "",
+            "userNickname": username or "",
+            "product": "SaaS",
+            "releaseDate": 1789036585355,
+            "commit": "5f9692923c93033111c51ad7b003eb80204a9b75",
+            "os": "win32",
+            "arch": "x64",
+            "osVersion": "10.0.19045",
+            "cpuModel": "AMD Ryzen 5 3500U with Radeon Vega Mobile Gfx  ",
+            "cpuCores": 8,
+            "memorySize": 18,
+            "vcsType": "unknown",
+            "vcsRepo": "",
+            "vcsBranchName": "",
+            "vcsRevId": "",
+            "codebuddy.session_id": conv_id,
+            "codebuddy.conversation_request_id": req_id,
+            "extName": "workbuddy-desktop",
+            "extVersion": "5.5.6",
+            "ideName": "WorkBuddy",
+            "ideType": "WorkBuddy",
+            "machineId": state["machineId"],
+            "sessionId": str(uuid.uuid4()),
+            "ideVersion": "5.5.6",
+        }
+
     # ---------- HTTP 工具 ----------
     def _headers(self, token, uid, domain, extra=None):
         h = {
@@ -316,18 +641,21 @@ class BuddyExecutor(BaseExecutor):
             h.update(extra)
         return h
 
-    def _call(self, path, token, uid, domain, extra=None, body=None, method="POST"):
-        """按 api_bases 顺序尝试；仅网络异常（status=None）才 fallback 到下一域名。"""
+    def _call(self, path, token, uid, domain, extra=None, body=None, method="POST", timeout=None, base=None):
+        """按 api_bases 顺序尝试；仅网络异常（status=None）才 fallback 到下一域名。
+        base 指定时只请求该域名（供会话复用逐个 base 重试）。"""
         last_err = None
-        for base in self.api_bases:
+        to = timeout if timeout is not None else self.timeout
+        bases = [base] if base else self.api_bases
+        for base in bases:
             url = base.rstrip("/") + path
             try:
                 hd = self._headers(token, uid, domain, extra)
                 if body is not None:
                     payload = body if isinstance(body, (str, bytes)) else json.dumps(body).encode("utf-8")
-                    r = requests.request(method, url, headers=hd, data=payload, timeout=self.timeout)
+                    r = requests.request(method, url, headers=hd, data=payload, timeout=to, allow_redirects=False)
                 else:
-                    r = requests.request(method, url, headers=hd, timeout=self.timeout)
+                    r = requests.request(method, url, headers=hd, timeout=to, allow_redirects=False)
                 return r.status_code, r.text
             except Exception as e:
                 last_err = str(e)
