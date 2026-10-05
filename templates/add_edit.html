@@ -439,12 +439,12 @@
         <!-- ============ Buddy 专用签到字段（仅令牌，其余接口内置） ============ -->
         <div id="secBuddy" style="display: none;">
             <div class="section-title">Buddy 专用签到（令牌式）</div>
-            <div class="form-tip" style="margin-bottom: 12px;">三个签到接口均为内置，无需任何额外配置；本机（Windows）可留空自动读取登录态，NAS/Docker 端只需在下方粘贴一次令牌。</div>
+            <div class="form-tip" style="margin-bottom: 12px;">三个签到接口均为内置，无需任何额外配置；令牌统一在本页「令牌」框粘贴提交，执行器不再读取本机登录态。</div>
             <div class="form-group">
                 <label style="display: block; margin-bottom: 7px; font-weight: bold;">令牌（Token）：
-                    <span style="color: #909399; font-weight: normal;">从 Windows 端导出的 token_store JSON（含 access_token/refresh_token 等），粘贴一次即可；续期会自动回写</span></label>
+                    <span style="color: #909399; font-weight: normal;">从客户端导出的 token_store JSON（含 access_token/refresh_token 等），粘贴一次即可；续期会自动回写</span></label>
                 <textarea name="token_store" rows="6" placeholder='{"access_token":"...","refresh_token":"...","domain":"...","uid":"...","username":"...","expires_at":...}'>{{ token_store_text }}</textarea>
-                <div class="form-tip">NAS/Docker 端：把 Windows 导出的 token_store 粘进来一次，后续续期自动滚动，无需再手动复制。本机（Windows）也可留空，程序自动读取 WorkBuddy 登录态文件。</div>
+                <div class="form-tip">粘贴 token_store JSON 一次即可，后续续期会自动滚动回写，无需再手动复制更新。</div>
             </div>
         </div>
 
