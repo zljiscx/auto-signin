@@ -1,32 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-Buddy 令牌式签到执行器（mode='buddy'）
-
-适用：WorkBuddy / Buddy加油站 这类用 Bearer Token 鉴权的后端签到接口。
-与现有 browser/api/browser_api 三种模式完全隔离，不改动它们的任何逻辑。
-
-整合要点（来自 D:\\.Buddy\\Buddy-signin）：
-- 鉴权：Authorization: Bearer <accessToken> + X-User-Id(=JWT sub) + X-Domain
-- 续期：POST /v2/plugin/auth/token/refresh（网关代持 client_secret，只需 refresh_token）
-        成功会轮换 access_token 与 refresh_token，必须回写才能实现「一次读取永久登录」
-- 签到：POST /v2/billing/meter/daily-checkin
-- 状态：POST /v2/billing/meter/checkin-activity-status
-- 成功判定（以 HTTP 状态码优先）：2xx 且 code==0 为签到成功；
-        code==10001 且文案含「已签到」为今日已签；5xx 及未知码一律判失败并重试。
-        注意：服务端故障时会复用业务码 10001（HTTP 500 +「签到配置加载失败」），
-        只读业务码会把故障误判成「已签到」，必须以 HTTP 状态码区分。
-- 重试：本模式自身对签到额外重试 3 次、间隔 10 秒（叠加项目整体重试后容错更高）。
-        重试只作用于签到本身，每日对话不参与重试。
-- 对话（独立功能，整合自 buddy_cloud_chat.py）：与签到完全解耦，签到成功与否都会执行。
-        每日自动发一条真实提问，会话复用 + chat_request_send 上报 + ACP 发问
-        （失败回退 chat/completions）。成功定义 = 提问已发出且收到含「好」的回复；
-        当日成功一次后写入 last_chat_date，此后手动或自动都不再重复发出（重复提问会浪费积分）。
-
-令牌来源（唯一）：
-站点持久化的 token_store —— 用户在 WEB 管理页站点编辑的「令牌」框粘贴一次
-（含 access_token / refresh_token）。本执行器不读取本机桌面登录态。
-续期成功后把新令牌回写 token_store（加密），下次运行直接复用。
-"""
+"""Buddy 令牌式签到：签到 + 每日对话 + 连登奖励，三者独立门控；令牌来自站点 token_store。"""
 import json
 import re
 import time
@@ -45,15 +18,14 @@ logger = logging.getLogger(__name__)
 
 ENDPOINT_CHECKIN = "/v2/billing/meter/daily-checkin"
 ENDPOINT_STATUS = "/v2/billing/meter/checkin-activity-status"
-ENDPOINT_REFRESH = "/v2/plugin/auth/token/refresh"  # 插件网关续期（网关代持 client_secret，无需密钥）
-# ---- 对话（连续登录记账信号）----
+ENDPOINT_REFRESH = "/v2/plugin/auth/token/refresh"  # 网关代持 client_secret
+# ---- 对话 ----
 ENDPOINT_CONV = "/v2/as/conversations/"
 ENDPOINT_SESSION = "/console/as/conversations/%s/session"
 ENDPOINT_REPORT = "/v2/report"
 ENDPOINT_CHAT = "/v2/chat/completions"
 
 MODEL_NAMES = {"hy3": "Hy3", "fast-model": "Fast"}
-# 对话默认配置：每天一条真实提问（可被站点 api_config 的 chat 子对象覆盖）
 DEFAULT_CHAT = {
     "enabled": True,
     "model": "hy3",
@@ -64,14 +36,22 @@ DEFAULT_CHAT = {
 DEFAULT_API_BASES = ["https://copilot.tencent.com", "https://www.codebuddy.cn"]
 DEFAULT_DOMAIN = "www.workbuddy.cn"
 
-# 签到自身重试：Buddy 专用模式对签到额外重试 3 次、固定间隔 10 秒。
-# 叠加项目整体重试（sign_service 的 retry_times）后总次数更多，用以跨越服务端短时故障窗口。
-# 该重试只包裹签到调用，每日对话不参与（见 run()）。
+# ---- 连登奖励 ----
+ENDPOINT_GROWTH = "/v2/activity/growth"
+# (tier 标识, 状态字段前缀, 展示名, 解锁天数)；tier 必须传档位标识，传天数会被判 unknown
+GROWTH_TIERS = (
+    ("7d", "starter", "入门", 7),
+    ("14d", "advanced", "进阶", 14),
+    ("28d", "legendary", "巅峰", 28),
+)
+DEFAULT_GROWTH = {"enabled": True}
+
+# 签到自身重试 3 次、间隔 10 秒；只包裹签到，对话与领奖不参与
 CHECKIN_RETRY_TIMES = 3
 CHECKIN_RETRY_INTERVAL = 10
 
 
-# ---------- JWT 解析（不校验签名，仅取声明） ----------
+# ---- JWT 解析（不校验签名） ----
 def _b64url_decode(s):
     s = s + "=" * (-len(s) % 4)
     return base64.urlsafe_b64decode(s)
@@ -101,11 +81,24 @@ def _pick(d, *keys):
     return None
 
 
+def _dig(obj, key):
+    """在可能被 data/result 包裹的响应里取字段。"""
+    if isinstance(obj, dict):
+        if obj.get(key) is not None:
+            return obj[key]
+        for k in ("data", "result", "resp", "response"):
+            if isinstance(obj.get(k), dict):
+                v = _dig(obj[k], key)
+                if v is not None:
+                    return v
+    return None
+
+
 @register_executor
 class BuddyExecutor(BaseExecutor):
     mode = 'buddy'
     label = 'Buddy专用(令牌)'
-    description = 'Buddy加油站/WorkBuddy 专用令牌式签到：三个接口内置、无需配置，在站点「令牌」框粘贴 token_store，自动续期保持永久登录，签到失败自身重试3次(间隔10秒)，按本项目时间表执行'
+    description = 'Buddy加油站/WorkBuddy 专用令牌式签到：接口内置、无需配置，在站点「令牌」框粘贴 token_store，自动续期保持永久登录；签到失败自身重试3次(间隔10秒)，每日对话与连登奖励领取三者独立门控'
 
     def __init__(self, ctx):
         BaseExecutor.__init__(self, ctx)
@@ -114,6 +107,7 @@ class BuddyExecutor(BaseExecutor):
         self.timeout = int(cfg.get('timeout') or 20)
         self.domain_cfg = (cfg.get('domain') or '').strip()
         self.chat_cfg = self._load_chat_cfg(cfg.get('chat'))
+        self.growth_cfg = self._load_growth_cfg(cfg.get('growth'))
 
     def run(self):
         ctx = self.ctx
@@ -122,30 +116,26 @@ class BuddyExecutor(BaseExecutor):
             ctx.log('未配置令牌：请在站点编辑页「令牌」框粘贴 token_store（含 access_token / refresh_token）', 'warning')
             return SignResult(False, '签到失败', None)
 
-        # 先续期再签到（token 模式每日一次；续期成功则回写新令牌）
+        # 先续期再签到，成功后回写新令牌
         token, uid, domain, store, refresh_note = self._maybe_refresh(token, uid, domain, store)
         if refresh_note:
             ctx.log('Buddy 续期: ' + refresh_note)
-        # 续期成功后 store 中的有效期已更新，取最新值用于过期校验与「已续期至」展示
         exp_ms = store.get("expires_at") or exp_ms
 
-        # token 过期检查
         now_ms = int(time.time() * 1000)
         if exp_ms and exp_ms < now_ms:
             ctx.log('accessToken 已过期，请在站点编辑页「令牌」框重新粘贴最新 token_store', 'warning')
             return SignResult(False, '签到失败', None)
 
-        # ---------- 签到（含本模式自身的 3 次重试）----------
         status, lines, checkin_data = self._claim_with_retry(token, uid, domain)
 
-        # ---------- 每日对话（与签到完全解耦的独立需求）----------
-        # 无论签到成功与否都要执行；当日已成功发起过一次则跳过，
-        # 避免重复发出提问浪费积分（详见 _run_chat_once）。
+        # 对话与签到独立：无论签到成败都执行，当日已成功发起则跳过
         chat_note = ''
         if self._chat_enabled():
             chat_note = self._run_chat_once(token, uid, nickname, domain, store)
 
-        # 拼接待追加到推送末尾的 Buddy 状态块（与前面的站点结果空一行）
+        growth_lines = self._run_growth_once(token, uid, domain, store)
+
         streak = today_c = total = None
         if status != 'fail':
             status_info = self._fetch_status(token, uid, domain)
@@ -180,9 +170,11 @@ class BuddyExecutor(BaseExecutor):
             buddy_lines.append("  已续期至：%s" % exp_date)
         if chat_note:
             buddy_lines.append("  每日登录：%s" % chat_note)
+        for ln in growth_lines:
+            buddy_lines.append("  " + ln)
         appendix = "\n".join(buddy_lines) if len(buddy_lines) > 1 else ""
 
-        # 签到失败：对话已照常执行，失败信息连同状态块一并返回
+        # 签到失败仍返回状态块（对话、领奖已执行）
         if status == 'fail':
             return SignResult(False, '签到失败', None, '', appendix)
 
@@ -191,11 +183,7 @@ class BuddyExecutor(BaseExecutor):
         return SignResult(True, msg, None, detail, appendix)
 
     def _claim_with_retry(self, token, uid, domain):
-        """签到调用 + 本模式自身的重试（CHECKIN_RETRY_TIMES 次、固定间隔）。
-
-        重试只包裹签到本身；每日对话在调用方单独执行，不受此重试次数影响。
-        返回 (status, lines, checkin_data)，status ∈ {'success','already','fail'}。
-        """
+        """签到 + 自身重试；返回 (status, lines, checkin_data)。"""
         status, lines, checkin_data = None, [], {}
         for attempt in range(1, CHECKIN_RETRY_TIMES + 1):
             status, lines, checkin_data = self._do_claim(token, uid, domain)
@@ -211,12 +199,9 @@ class BuddyExecutor(BaseExecutor):
                              % (attempt, CHECKIN_RETRY_TIMES, err), 'error')
         return status, lines, checkin_data
 
-    # ---------- 令牌加载 ----------
+    # ---- 令牌加载 ----
     def _load_token(self):
-        """仅从站点持久化的 token_store 取 (token, exp_ms, nickname, uid, domain, store)。
-
-        令牌由用户在 WEB 管理页「令牌」框提交，本执行器不再读取本机桌面登录态文件。
-        """
+        """只从 token_store 取令牌，不读本机登录态。"""
         store = dict(self.ctx.token_store or {})
         at = store.get("access_token")
         if not at:
@@ -229,10 +214,9 @@ class BuddyExecutor(BaseExecutor):
         domain = store.get("domain") or self.domain_cfg or DEFAULT_DOMAIN
         return at, exp_ms, nickname, uid, domain, store
 
-    # ---------- 续期 ----------
+    # ---- 续期 ----
     def _maybe_refresh(self, token, uid, domain, store):
-        """token 模式下每日首次调用前续期（先续期再签到）。
-        成功则回存新 token/refresh_token 到 token_store 并返回新凭据；否则原样返回。"""
+        """每日首次续期，成功回写 token_store。"""
         today = datetime.datetime.now().strftime("%Y-%m-%d")
         if store.get("last_refresh_date") == today:
             return token, uid, domain, store, ""
@@ -246,7 +230,7 @@ class BuddyExecutor(BaseExecutor):
 
         now_ms = int(time.time() * 1000)
         store["access_token"] = data["accessToken"]
-        if data.get("refreshToken"):           # refresh token 会轮换，必须回存否则链条断裂
+        if data.get("refreshToken"):           # 会轮换，必须回存
             store["refresh_token"] = data["refreshToken"]
         if data.get("expiresIn"):
             store["expires_at"] = now_ms + int(data["expiresIn"]) * 1000
@@ -267,7 +251,7 @@ class BuddyExecutor(BaseExecutor):
             "🔑 已自动续期（有效期至 %s）" % exp_str
 
     def _do_refresh(self, token, uid, domain, rt):
-        """调用插件网关续期。成功返回响应 data 字典，失败返回 None。"""
+        """调网关续期，成功返回 data，失败返回 None。"""
         extra = {
             "X-Refresh-Token": rt,
             "X-Auth-Refresh-Source": "plugin",
@@ -290,14 +274,9 @@ class BuddyExecutor(BaseExecutor):
                      % (resp.get("code"), resp.get("msg"), (body or "")[:200]), "warning")
         return None
 
-    # ---------- 签到 / 状态 ----------
+    # ---- 签到 / 状态 ----
     def _do_claim(self, token, uid, domain):
-        """执行一次签到调用。返回 (status, lines, checkin_data)；status ∈ {'success','already','fail'}
-
-        判定以 HTTP 状态码优先：服务端故障时会复用业务码 10001
-        （HTTP 500 +「签到配置加载失败，请稍后重试」），仅凭 code 无法区分
-        「今日已签到」与「服务端故障」，必须结合 HTTP 状态码。
-        """
+        """签到一次；服务端故障会复用 code=10001，故按 HTTP 状态码优先判定。"""
         st, body = self._call(ENDPOINT_CHECKIN, token, uid, domain)
         if st is None:
             return 'fail', ["网络不可达：所有 API 域名均失败"], {}
@@ -309,24 +288,24 @@ class BuddyExecutor(BaseExecutor):
         msg = resp.get("msg", "")
         data = resp.get("data") or {}
 
-        # 1) 服务端故障（5xx）：无论业务码是什么一律判失败，交给上层重试
+        # 5xx 一律失败，交给上层重试
         if st >= 500:
             return 'fail', ["服务端故障 HTTP %s code=%s msg=%s" % (st, code, msg)], data
-        # 2) 签到成功：必须 HTTP 2xx 且 code==0
+        # 成功：2xx 且 code==0
         if 200 <= st < 300 and code == 0:
             credit = _pick(data, "credit", "today_credit", "daily_credit")
             lines = []
             if credit is not None:
                 lines.append("本次获得积分：%s" % credit)
             return 'success', lines, data
-        # 3) 今日已签到：业务码 10001 且文案含「已签到」（正常返回 HTTP 400；5xx 已在上面拦掉）
+        # 已签到：10001 且文案含「已签到」（正常为 HTTP 400，5xx 已拦）
         if code == 10001 and "已签到" in msg:
             return 'already', [], data
-        # 4) 其余（未知 code、401/403、其它 4xx 等）一律失败
+        # 其余（未知码、401/403、其它 4xx）均失败
         return 'fail', ["签到异常 HTTP %s code=%s msg=%s" % (st, code, msg)], data
 
     def _fetch_status(self, token, uid, domain):
-        """查询签到状态；成功返回 data 字典，失败返回 {}。该接口须用 POST（与原 buddy_checkin.py 一致）。"""
+        """签到状态；须用 POST。"""
         st, body = self._call(ENDPOINT_STATUS, token, uid, domain)
         if st == 200:
             try:
@@ -335,9 +314,105 @@ class BuddyExecutor(BaseExecutor):
                 return {}
         return {}
 
-    # ---------- 每日对话（连续登录记账信号，整合自 buddy_cloud_chat.py） ----------
+    # ---- 连登奖励 ----
+    def _load_growth_cfg(self, override):
+        """默认配置 + 站点 api_config.growth 覆盖。"""
+        c = dict(DEFAULT_GROWTH)
+        if isinstance(override, dict):
+            c.update({k: v for k, v in override.items() if v not in (None, "")})
+        return c
+
+    def _growth_enabled(self):
+        return bool(self.growth_cfg.get("enabled", True))
+
+    def _growth_call(self, path, token, uid, domain, payload=None):
+        """成长接口：payload 为 None 走 GET，否则 POST。"""
+        extra = {"X-Product": "SaaS"}
+        body, method = None, "GET"
+        if payload is not None:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            method = "POST"
+        st, text = self._call(ENDPOINT_GROWTH + path, token, uid, domain,
+                              extra, body=body, method=method)
+        if st is None:
+            return None, {}
+        try:
+            return st, json.loads(text)
+        except Exception:
+            return st, {}
+
+    def _run_growth_once(self, token, uid, domain, store):
+        """每日一次领奖检查，返回推送行；无可领或已检查返回 []。"""
+        if not self._growth_enabled():
+            return []
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        state = dict(store.get("growth_state") or {})
+        if state.get("last_checked_date") == today:
+            self.ctx.log('Buddy 领奖: 今日(%s)已检查，跳过' % today)
+            return []
+        try:
+            ok, lines = self._claim_growth_rewards(token, uid, domain)
+        except Exception as e:
+            self.ctx.log('Buddy 领奖异常: %s' % e, 'error')
+            return ["领奖：异常（%s）" % str(e)[:120]]
+        for ln in lines:
+            self.ctx.log('Buddy 领奖: ' + ln)
+        if ok:
+            state["last_checked_date"] = today
+            state["last_checked_time"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            store["growth_state"] = state
+            self._persist_token_store(store)
+        return lines
+
+    def _claim_growth_rewards(self, token, uid, domain):
+        """领取可领档位（服务端按档幂等），返回 (ok, 行)。"""
+        st, summary = self._growth_call("/redeem/summary", token, uid, domain)
+        if st is None:
+            return False, ["领奖：查询失败（网络不可达）"]
+        if st in (401, 403):
+            return False, ["领奖：查询被拒绝（HTTP %s）" % st]
+        if not (200 <= st < 300):
+            return False, ["领奖：状态查询失败（HTTP %s）" % st]
+
+        got, errors = [], []
+        for tier, status_key, _label, days in GROWTH_TIERS:
+            state = _dig(summary, status_key + "_status")
+            if not state or state in ("claimed", "locked"):
+                continue
+            code, resp = self._growth_call("/redeem", token, uid, domain,
+                                           {"tier": tier, "client_token": "u-%s" % uuid.uuid4()})
+            # tier 被判 unknown 时退回天数重试（400 不会重复领取）
+            if code == 400 and "tier" in str(_dig(resp, "msg") or "").lower():
+                code, resp = self._growth_call("/redeem", token, uid, domain,
+                                               {"tier": days, "client_token": "u-%s" % uuid.uuid4()})
+            if code is not None and 200 <= code < 300:
+                got.append("领%d天档：%s" % (days, self._reward_text(resp)))
+            elif code == 403:
+                continue            # 连登天数不足，不算失败
+            else:
+                errors.append("领%d天档：领取失败（HTTP %s %s）"
+                              % (days, code, _dig(resp, "msg") or ""))
+
+        if got:
+            return True, got + errors
+        if errors:
+            return False, errors
+        return True, []             # 无可领档位：静默
+
+    @staticmethod
+    def _reward_text(resp):
+        """发放数量拼成「+100 积分 +1 补登卡」。"""
+        bits = []
+        for key, unit in (("credit_granted", "积分"), ("energy_granted", "能量"),
+                          ("cards_granted", "补登卡"), ("chances_granted", "抽奖次数")):
+            v = _dig(resp, key)
+            if isinstance(v, int) and v:
+                bits.append("+%s %s" % (v, unit))
+        return " ".join(bits) if bits else "已领取"
+
+    # ---- 每日对话 ----
     def _load_chat_cfg(self, override):
-        """对话配置：默认 + 站点覆盖（空值不覆盖）。override 来自站点 api_config 的 chat 子对象。"""
+        """默认配置 + 站点 api_config.chat 覆盖。"""
         c = dict(DEFAULT_CHAT)
         if isinstance(override, dict):
             c.update({k: v for k, v in override.items() if v not in (None, "")})
@@ -347,12 +422,7 @@ class BuddyExecutor(BaseExecutor):
         return bool(self.chat_cfg.get("enabled", True))
 
     def _run_chat_once(self, token, uid, nickname, domain, store):
-        """每日一次真实对话。返回 '完成' / '失败' / ''（对话功能已禁用）。
-
-        独立于签到：签到成功与否都会执行。当日已成功发起过一次后，
-        无论手动还是自动、无论签到结果，都不再重复发出（重复提问会浪费积分）。
-        成功定义 = 已发出提问且收到含「好」的回复（见 _do_chat）。
-        """
+        """每日一次对话；当日已成功则跳过。返回 '完成' / '失败' / ''（禁用）。"""
         if not self._chat_enabled():
             return ''
         today = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -369,10 +439,7 @@ class BuddyExecutor(BaseExecutor):
         return '完成' if ok else '失败'
 
     def _do_chat(self, token, uid, username, domain, store, state, chat_cfg):
-        """发一条真实提问（会话复用 + 上报 + ACP）。成功则写入当日记录。返回 (ok, 结果行)。
-
-        成功定义：提问已发出，且收到含「好」的回复。仅 HTTP 成功不算成功。
-        """
+        """发提问并判定回复含「好」，成功写当日记录。返回 (ok, 行)。"""
         prompt = chat_cfg.get("prompt") or DEFAULT_CHAT["prompt"]
         model = chat_cfg.get("model") or "hy3"
         timeout = int(chat_cfg.get("timeout") or 90)
@@ -416,9 +483,7 @@ class BuddyExecutor(BaseExecutor):
         return ok, line
 
     def _resolve_conversation(self, token, uid, domain, state):
-        """优先复用已保存的会话（避免每天新建一堆），拿不到才创建。返回 (cid, tok, link, reused)。
-        原样照搬原版逻辑：遍历所有 api_bases 逐个试会话 GET，某 base 非 200 即换下一个；
-        仅当所有 base 都拿不到 token/link 时才新建。"""
+        """优先复用已保存会话，拿不到才新建。"""
         old = state.get("conversationId")
         if old:
             for base in self.api_bases:
@@ -436,7 +501,7 @@ class BuddyExecutor(BaseExecutor):
         return cid, stok, link, False
 
     def _create_conversation(self, token, uid, domain):
-        """在服务端创建真实会话，返回 (conversation_id, session_token, acp_link)。"""
+        """创建会话，返回 (conversation_id, session_token, acp_link)。"""
         for base in self.api_bases:
             st, body = self._call(ENDPOINT_CONV, token, uid, domain, body=b"{}")
             if st is None:
@@ -451,7 +516,7 @@ class BuddyExecutor(BaseExecutor):
         return None, None, None
 
     def _report_chat(self, token, uid, domain, ev):
-        """上报 chat_request_send（连续登录的真正记账信号）。返回 (status, code)。"""
+        """上报 chat_request_send（连续登录记账信号）。"""
         body = json.dumps([ev], ensure_ascii=False).encode("utf-8")
         extra = {"X-Product": "SaaS", "X-Requested-With": "WorkBuddy"}
         st, rbody = self._call(ENDPOINT_REPORT, token, uid, domain, extra, body)
@@ -464,8 +529,7 @@ class BuddyExecutor(BaseExecutor):
         return st, code
 
     def _acp_prompt(self, link, session_token, conv_id, prompt, uid, domain, timeout):
-        """ACP 发一条真实提问：bootstrap 取连接 id，再 session/prompt。返回 (ok, raw_sse)。
-        原样照搬自 buddy_checkin.py（http.client 实现，已验证可用）。"""
+        """ACP 发问：bootstrap 取连接 id，再 session/prompt。"""
         import http.client
         import ssl
         u = urlparse(link)
@@ -526,11 +590,7 @@ class BuddyExecutor(BaseExecutor):
 
     @staticmethod
     def _extract_acp_text(raw):
-        """从 ACP 的 SSE 里抽取模型回复文本；兼容服务端两种编码：\\uXXXX 转义与直传 UTF-8。
-
-        注意：不可用 encode().decode('unicode_escape') 统一处理 —— 服务端若直传 UTF-8 中文，
-        该写法会把字节按 latin-1 还原成乱码，导致回复文本无法用于判定。
-        """
+        """抽取 SSE 回复文本；不能用 unicode_escape（服务端可能直传 UTF-8 中文）。"""
         parts = re.findall(r'"text"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
         out = []
         for p in parts:
@@ -544,7 +604,7 @@ class BuddyExecutor(BaseExecutor):
         return "".join(out).strip()
 
     def _chat_completions(self, token, uid, domain, prompt, model, timeout):
-        """ACP 不可用时的回退：流式 chat/completions。原样照搬自 buddy_checkin.py（urllib 实现）。"""
+        """ACP 不可用时的回退：流式 chat/completions。"""
         import urllib.request
         body = json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}],
                            "stream": True}, ensure_ascii=False).encode("utf-8")
@@ -589,12 +649,10 @@ class BuddyExecutor(BaseExecutor):
 
     @staticmethod
     def _reply_has_ok(text):
-        """对话成功判定：回复里出现了期望的那个「好」字。"""
         return "好" in (text or "")
 
     @staticmethod
     def _build_chat_event(uid, username, model, prompt, state, conv_id=None):
-        """照抄 CLI 真实 chat_request_send payload，仅随机化每次调用相关的 ID。"""
         now = int(time.time() * 1000)
         conv_id = conv_id or str(uuid.uuid4())
         req_id = uuid.uuid4().hex
@@ -661,7 +719,7 @@ class BuddyExecutor(BaseExecutor):
             "ideVersion": "5.5.6",
         }
 
-    # ---------- HTTP 工具 ----------
+    # ---- HTTP 工具 ----
     def _headers(self, token, uid, domain, extra=None):
         h = {
             "Authorization": "Bearer " + (token or ""),
@@ -676,8 +734,7 @@ class BuddyExecutor(BaseExecutor):
         return h
 
     def _call(self, path, token, uid, domain, extra=None, body=None, method="POST", timeout=None, base=None):
-        """按 api_bases 顺序尝试；仅网络异常（status=None）才 fallback 到下一域名。
-        base 指定时只请求该域名（供会话复用逐个 base 重试）。"""
+        """按 api_bases 顺序尝试，仅网络异常才换域名；指定 base 时只请求该域名。"""
         last_err = None
         to = timeout if timeout is not None else self.timeout
         bases = [base] if base else self.api_bases
@@ -696,9 +753,8 @@ class BuddyExecutor(BaseExecutor):
                 self.ctx.log("WARN %s 不可达: %s" % (base, e), "warning")
         return None, last_err
 
-    # ---------- 持久化 ----------
+    # ---- 持久化 ----
     def _persist_token_store(self, store):
-        """把令牌存储（dict）加密回写到站点 token_store 列。"""
         try:
             from models import update_site_token_store
             update_site_token_store(self.ctx.site_id,
