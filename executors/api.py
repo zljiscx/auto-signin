@@ -88,6 +88,13 @@ def normalize_login(login_raw):
     return {'steps': []}
 
 
+def _ssl_hint(err):
+    """证书校验失败时补充可操作提示（容器 CA 库缺失或过旧最常见）。"""
+    if 'CERTIFICATE_VERIFY_FAILED' in str(err):
+        return '；证书校验失败：容器内 CA 库缺失或过旧，可在站点配置关闭「校验SSL证书」(verify_ssl=false)，或更新容器 certifi'
+    return ''
+
+
 @register_executor
 class ApiExecutor(BaseExecutor):
     mode = 'api'
@@ -178,7 +185,7 @@ class ApiExecutor(BaseExecutor):
                     status, text, headers = self._do_request(
                         step, timeout, follow_redirect, verify_ssl, use_site_cookies)
                 except Exception as e:
-                    return False, '登录步骤「%s」请求失败：%s' % (name, e)
+                    return False, '登录步骤「%s」请求失败：%s%s' % (name, e, _ssl_hint(e))
                 last_status, last_text, last_headers = status, text, headers
                 ctx.log('登录步骤「%s」完成，HTTP %s，响应长度 %s' % (name, status, len(text or '')))
                 self._sync_cookies()
@@ -233,7 +240,7 @@ class ApiExecutor(BaseExecutor):
                     status, text, headers = self._do_request(
                         step, timeout, follow_redirect, verify_ssl, use_site_cookies)
                 except Exception as e:
-                    ctx.log('步骤「%s」请求异常: %s' % (name, e), 'error')
+                    ctx.log('步骤「%s」请求异常: %s%s' % (name, e, _ssl_hint(e)), 'error')
                     return SignResult(False, '签到失败', ctx.cookies)
 
                 last_status, last_text, last_headers = status, text, headers

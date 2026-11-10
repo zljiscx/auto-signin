@@ -78,16 +78,16 @@
             </div>
         </div>
 
-        <!-- ============ 浏览器模式字段 ============ -->
-        <div id="secBrowser">
-            <div class="section-title">网页信息（浏览器模式）</div>
+        <!-- ============ 账号密码（浏览器登录 / API 登录接口共用） ============ -->
+        <div id="secAccount"{% if v.mode == 'buddy' %} style="display: none;"{% endif %}>
+            <div class="section-title">账号密码</div>
             <div class="form-row">
                 <div class="form-group">
                     <div class="form-item-row">
                         <label>用户名：</label>
                         <input type="text" name="username" value="{{ site.username if site else '' }}">
                     </div>
-                    <div class="form-tip">仅Cookie登录可留空</div>
+                    <div class="form-tip">浏览器登录与 API 登录接口共用，接口里用 {% raw %}{{username}}{% endraw %} 引用；纯 Cookie 登录可留空</div>
                 </div>
                 <div class="form-group">
                     <div class="form-item-row">
@@ -95,8 +95,14 @@
                         {% set placeholder_text = "不修改请留空；输入-清除密码；纯Cookie登录直接留空" if site else "纯Cookie登录可留空" %}
                         <input type="password" name="password" placeholder="{{ placeholder_text }}">
                     </div>
+                    <div class="form-tip">API 登录接口里用 {% raw %}{{password}}{% endraw %} 引用</div>
                 </div>
             </div>
+        </div>
+
+        <!-- ============ 浏览器模式字段 ============ -->
+        <div id="secBrowser">
+            <div class="section-title">网页信息（浏览器模式）</div>
 
             <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
                 <div class="form-switch" style="margin-bottom: 0;">
@@ -582,6 +588,8 @@
         // api / browser_api 都需要 API 接口配置（browser_api 用浏览器登录、API签到）
         var hasApi = (m === 'api' || m === 'browser_api');
         var isBuddy = (m === 'buddy');
+        // 账号密码浏览器登录与API登录接口共用，仅 Buddy 模式隐藏
+        document.getElementById('secAccount').style.display = isBuddy ? 'none' : '';
         document.getElementById('secBrowser').style.display = isBrowser ? '' : 'none';
         document.getElementById('secApi').style.display = hasApi ? '' : 'none';
         document.getElementById('secBuddy').style.display = isBuddy ? '' : 'none';
