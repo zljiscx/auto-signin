@@ -2,7 +2,7 @@
 
 ## 工作流约定
 
-- 改动验证通过后，直接提交并推送到 GitHub（origin = https://github.com/zljiscx/auto-signin.git，分支 main），无需每次再问。
+- **不要自动推送 GitHub**（origin = https://github.com/zljiscx/auto-signin.git，分支 main）。只在用户明确下达推送指令时推送；若判断当次改动值得推送，先问一句「要不要推送」，同意后再推。
 - 提交说明要简明扼要，只讲重点：一句话主题 + 3~4 条要点，不写背景铺垫。
 
 ## 环境

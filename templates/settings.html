@@ -3,7 +3,7 @@
 {% block content %}
 <div class="card">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px;">
-        <h2 style="margin: 0;">系统设置</h2>
+        <h2 class="section-title" style="margin: 0;">系统设置</h2>
         <div style="display: flex; gap: 12px; align-items: center;">
             <form method="post" action="{{ url_for('backup_config') }}" target="_blank">
                 <button type="submit" class="btn">
@@ -47,10 +47,20 @@
             .form-input-line input {
                 flex: 1;
             }
+            /* 各区块标题统一：与页首「系统设置」同一样式 */
+            .section-title {
+                margin: 0 0 18px;
+                font-size: 20px;
+                font-weight: 600;
+                color: #303133;
+                line-height: 1.4;
+            }
+            .section-title.mt {
+                margin-top: 32px;
+            }
         </style>
 
-        <!-- 第一行：每日签到时间 | 失败重试次数 -->
-        <!-- 第一行：每日签到时间 | 失败重试次数 -->
+        <!-- 第一行：签到时间 | 重试次数 -->
         <div class="form-row">
             <div class="form-group">
                 <div class="form-item-row" style="align-items: flex-start;">
@@ -128,30 +138,37 @@
                     <span style="font-weight: bold;" class="switch-text">无头模式（NAS/服务器建议开启）</span>
                 </div>
             </div>
-
-            <div class="form-group">
-                <div class="form-item-row">
-                    <label>桌面浏览器地址：</label>
-                    <div class="form-input-line">
-                        <input type="text" name="desktop_browser_address" value="{{ configs.desktop_browser_address }}"
-                               placeholder="留空自动（Windows 拉起本地，NAS 探测 100.100.1.10:9222）" style="width: 320px;">
-                    </div>
-                </div>
-                <div class="form-item-row" style="margin-top: 10px;">
-                    <label>桌面浏览器路径：</label>
-                    <div class="form-input-line">
-                        <input type="text" name="desktop_browser_path" value="{{ configs.desktop_browser_path }}"
-                               placeholder="留空自动查找 Chrome/Edge，仅本地拉起时使用" style="width: 320px;">
-                    </div>
-                </div>
-                <div class="form-tip">「桌面浏览器模式(CDP)」使用。地址可填 <code>host:port</code>（连远端有头浏览器）、
-                    <code>local</code>（强制本地拉起）或留空自动；NAS 无桌面环境，需连 <code>100.100.1.10:9222</code> 这类已就绪的 CDP 入口。</div>
-            </div>
         </div>
 
+        <!-- 第二行：桌面浏览器（CDP） -->
+        <hr class="my-4">
+        <h2 class="section-title mt">桌面浏览器设置（CDP 模式）</h2>
+        <div class="form-row">
+            <div class="form-group">
+                <div class="form-item-row">
+                    <label style="width: 130px; text-align: left; text-align-last: left;">浏览器地址：</label>
+                    <div class="form-input-line">
+                        <input type="text" name="desktop_browser_address" value="{{ configs.desktop_browser_address }}"
+                               placeholder="留空自动；NAS 填 100.100.1.10:9222">
+                    </div>
+                </div>
+            </div>
+            <div class="form-group">
+                <div class="form-item-row">
+                    <label style="width: 130px; text-align: left; text-align-last: left;">浏览器路径：</label>
+                    <div class="form-input-line">
+                        <input type="text" name="desktop_browser_path" value="{{ configs.desktop_browser_path }}"
+                               placeholder="留空自动查找 Chrome/Edge">
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="form-tip" style="margin-bottom: 4px;">仅「桌面浏览器模式(CDP)」使用。地址可填
+            <code>host:port</code>（连远端有头浏览器）、<code>local</code>（强制本地拉起）或留空自动；
+            NAS 无桌面环境，需连 <code>100.100.1.10:9222</code> 这类已就绪的 CDP 入口。</div>
 
         <hr class="my-4">
-        <h4 style="margin: 25px 0 15px; font-size: 16px; font-weight: 600; color: #303133;">百度OCR配置（验证码识别）</h4>
+        <h2 class="section-title mt">百度OCR配置（验证码识别）</h2>
         <div class="form-row">
             <div class="form-group">
                 <div class="form-item-row">
@@ -178,7 +195,7 @@
         </div>
 
         <hr class="my-4">
-        <h4 style="margin: 25px 0 15px; font-size: 16px; font-weight: 600; color: #303133;">企业微信推送 Webhook</h4>
+        <h2 class="section-title mt">企业微信推送 Webhook</h2>
         <div class="form-group">
             <div class="form-item-row">
                 <label>URL Key :</label>
