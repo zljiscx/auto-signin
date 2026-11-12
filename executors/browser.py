@@ -261,7 +261,7 @@ def is_login_page(driver):
         return True
     try:
         # 存在密码输入框即大概率为登录页（用户名框命名多样：email/phone/account/identity 等）
-        if driver.page.ele('input[type="password"]', timeout=0.5):
+        if driver.run_js("return !!document.querySelector('input[type=\"password\"]');"):
             return True
     except Exception:
         pass
@@ -330,6 +330,8 @@ def detect_login_fields(driver):
         if (ac) return el.tagName.toLowerCase() + '[autocomplete="' + ac + '"]';
         var ph = el.getAttribute('placeholder');
         if (ph) return el.tagName.toLowerCase() + '[placeholder="' + ph + '"]';
+        var ty = el.getAttribute('type');
+        if (ty) return el.tagName.toLowerCase() + '[type="' + ty + '"]';
         return el.tagName.toLowerCase();
       }
       function findSubmit(ctx){
@@ -520,6 +522,12 @@ def click_sign_button(driver, site, logger_=logger):
                 return True
         except Exception as e:
             logger_.debug("自定义选择器点击失败:%s" % e)
+        # DrissionPage 不认 'input[value="签到"]' 这类纯 CSS 写法，再用 JS 试一次
+        try:
+            if driver.run_js(JS_CLICK_TEMPLATE % json.dumps(sign_btn_sel)):
+                return True
+        except Exception as e:
+            logger_.debug("自定义CSS选择器点击失败:%s" % e)
 
     # 2. 遍历默认class选择器
     for sel in DEFAULT_SIGN_BUTTON_SELECTORS:
@@ -533,27 +541,32 @@ def click_sign_button(driver, site, logger_=logger):
         except Exception:
             continue
 
-    # 3. 终极JS兜底：滚动到底、遍历x-button、滚动到元素、模拟全套鼠标事件
+    # 3. 终极JS兜底：滚动到底、遍历可点击元素、按文案定位、模拟全套鼠标事件
     js_code = '''
     async function clickSignBtn(){
         window.scrollTo(0, document.body.scrollHeight);
         await new Promise(r=>setTimeout(r,800));
-        let allElements = Array.from(document.querySelectorAll('.x-button'));
+        let allElements = Array.from(document.querySelectorAll(
+            '.x-button, button, input[type=submit], input[type=button], a'));
         const frames = document.querySelectorAll('iframe');
         for(let frame of frames){
             try{
                 const frameDoc = frame.contentDocument || frame.contentWindow.document;
-                const frameBtns = frameDoc.querySelectorAll('.x-button');
+                const frameBtns = frameDoc.querySelectorAll(
+                    '.x-button, button, input[type=submit], input[type=button], a');
                 allElements = allElements.concat(Array.from(frameBtns));
             }catch(e){}
         }
-        // 优先找 立即签到，排除签到记录
+        function txtOf(el){ return (el.textContent || el.value || '').trim(); }
+        // 优先“立即签到”，排除签到记录/已签到
         let target = null;
         for(let el of allElements){
-            const txt = el.textContent.trim();
-            if(txt === "立即签到"){
-                target = el;
-                break;
+            if(txtOf(el) === "立即签到"){ target = el; break; }
+        }
+        if(!target){
+            for(let el of allElements){
+                const t = txtOf(el);
+                if(t.indexOf("立即签到") >= 0){ target = el; break; }
             }
         }
         if(!target) return false;
@@ -576,14 +589,23 @@ def click_sign_button(driver, site, logger_=logger):
 
 
 # ---------------- Cloudflare 处理 ----------------
+def _turnstile_token_len(driver):
+    """读 Turnstile 响应 token 长度；-1 表示页面没有该字段。
+
+    DrissionPage 的 ele() 不认 'input[name=...]' 这类纯 CSS 写法，统一走 JS 取值。
+    """
+    try:
+        return int(driver.run_js(
+            'var e=document.querySelector(\'input[name="cf-turnstile-response"]\');'
+            "return e ? (e.value || '').length : -1;"))
+    except Exception:
+        return -1
+
+
 def _has_turnstile(driver):
     """检测页面是否存在Cloudflare Turnstile验证组件"""
-    try:
-        ele = driver.page.ele('input[name="cf-turnstile-response"]', timeout=1)
-        if ele:
-            return True
-    except Exception:
-        pass
+    if _turnstile_token_len(driver) >= 0:
+        return True
     try:
         ele = driver.page.ele('tag:iframe@src()=challenges.cloudflare.com', timeout=1)
         if ele:
@@ -621,13 +643,9 @@ def _handle_turnstile(driver, timeout=30):
     click_count = 0
 
     while time.time() - start < timeout:
-        try:
-            resp_input = driver.page.ele('input[name="cf-turnstile-response"]', timeout=0.5)
-            if resp_input and resp_input.attr('value'):
-                logger.info("Turnstile验证已通过")
-                return True
-        except Exception:
-            pass
+        if _turnstile_token_len(driver) > 20:
+            logger.info("Turnstile验证已通过")
+            return True
 
         html = driver.get_page_source() or ''
         if 'cf-turnstile' not in html and 'challenges.cloudflare.com' not in html:
@@ -647,12 +665,8 @@ def _handle_turnstile(driver, timeout=30):
 
         time.sleep(2)
 
-    try:
-        resp_input = driver.page.ele('input[name="cf-turnstile-response"]', timeout=1)
-        if resp_input and resp_input.attr('value'):
-            return True
-    except Exception:
-        pass
+    if _turnstile_token_len(driver) > 20:
+        return True
 
     html = driver.get_page_source() or ''
     if 'Verify you are human' not in html and '请验证您是真人' not in html and 'Just a moment' not in html:
@@ -786,13 +800,9 @@ def _wait_cloudflare(driver, timeout=60, is_manual=False):
     turnstile_detected = False
     while time.time() - start < timeout:
         html = driver.get_page_source() or ''
-        try:
-            resp = driver.page.ele('input[name="cf-turnstile-response"]', timeout=0.5)
-            if resp and resp.attr('value'):
-                logger.info("Turnstile验证已通过，继续流程")
-                return True
-        except Exception:
-            pass
+        if _turnstile_token_len(driver) > 20:
+            logger.info("Turnstile验证已通过，继续流程")
+            return True
         if 'cf-turnstile' not in html and 'challenges.cloudflare.com' not in html:
             if _turnstile_had_challenge:
                 logger.info("Turnstile组件已消失，验证通过")
