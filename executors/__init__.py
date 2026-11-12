@@ -18,14 +18,15 @@ __all__ = [
     'BaseExecutor', 'SignContext', 'SignResult', 'register_executor',
     'get_executor', 'list_executors', 'get_mode_label', 'filter_cookies',
     'ApiExecutor', 'BrowserApiExecutor', 'normalize_api_config', 'build_config_from_curl',
-    'BuddyExecutor',
+    'BuddyExecutor', 'DesktopBrowserExecutor',
 ]
 
 logger = logging.getLogger(__name__)
 
 try:
-    from .browser import BrowserExecutor, DrissionPageDriver  # noqa: F401
+    from .browser import BrowserExecutor, DrissionPageDriver, DesktopBrowserExecutor  # noqa: F401
 except Exception as e:  # DrissionPage 未安装或环境异常时，仍允许使用 API 模式
     BrowserExecutor = None
     DrissionPageDriver = None
+    DesktopBrowserExecutor = None
     logger.warning('浏览器执行器不可用（%s），仅能使用非浏览器签到模式' % e)

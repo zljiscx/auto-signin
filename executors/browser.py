@@ -12,9 +12,11 @@ import json
 import shutil
 import tempfile
 import logging
+import subprocess
 from abc import ABC, abstractmethod
 from urllib.parse import urlparse
 
+import requests
 from DrissionPage import ChromiumPage, ChromiumOptions
 
 from models import get_config
@@ -32,6 +34,162 @@ logger = logging.getLogger(__name__)
 
 # 调试截图目录，Docker下挂载此目录查看截图
 DEBUG_SCREENSHOT_DIR = os.environ.get('DEBUG_SCREENSHOT_DIR', os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'debug'))
+
+# ---------------- 桌面浏览器模式（CDP） ----------------
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 本地拉起的桌面浏览器使用固定 profile：保留登录态与 cf_clearance，下次运行免登录
+DESKTOP_PROFILE_DIR = os.path.join(PROJECT_ROOT, 'chrome_data', 'desktop')
+DESKTOP_LOCAL_PORT = 9333
+# 远端 CDP 候选地址：容器宿主(zljiscx) -> 组网固定入口 -> 本机
+DESKTOP_CANDIDATE_ADDRESSES = ('172.20.0.1:9222', '100.100.1.10:9222', '127.0.0.1:9222')
+# CF 挑战页（interstitial）特征：命中才考虑重载，避免误伤内嵌 Turnstile 的正常页面
+CF_CHALLENGE_MARKERS = (
+    'Just a moment', 'cf-browser-verification', 'cf_chl_opt',
+    'Checking your browser before accessing', 'Attention Required! | Cloudflare',
+    'Enable JavaScript and cookies to continue',
+)
+NO_PROXY_MAP = {'http': None, 'https': None}
+
+
+def _ensure_no_proxy(*hosts):
+    """把 CDP 地址加入 NO_PROXY：容器/PC 上的全局代理会让 requests 与驱动连不上本机端口"""
+    items = [x.strip() for x in (os.environ.get('NO_PROXY') or '').split(',') if x.strip()]
+    for h in ('127.0.0.1', 'localhost') + tuple(hosts):
+        h = (h or '').split(':')[0]
+        if h and h not in items:
+            items.append(h)
+    if items:
+        val = ','.join(items)
+        os.environ['NO_PROXY'] = val
+        os.environ['no_proxy'] = val
+
+
+def cdp_version(address, timeout=3):
+    """读取 CDP 的 /json/version，返回版本字典；不可达返回 None"""
+    try:
+        r = requests.get('http://%s/json/version' % address, timeout=timeout, proxies=NO_PROXY_MAP)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
+
+
+def _cdp_tabs(address, timeout=3):
+    try:
+        return requests.get('http://%s/json' % address, timeout=timeout, proxies=NO_PROXY_MAP).json() or []
+    except Exception:
+        return []
+
+
+def ensure_page_tab(address):
+    """保证至少有一个 page 标签：远程连接会接管标签，关光了就再也连不上"""
+    if any(t.get('type') == 'page' for t in _cdp_tabs(address)):
+        return True
+    try:
+        # 实测 GET /json/new 返回 405，必须用 PUT
+        requests.put('http://%s/json/new?about:blank' % address, timeout=5, proxies=NO_PROXY_MAP)
+        return True
+    except Exception as e:
+        logger.debug('补建标签页失败: %s' % e)
+        return False
+
+
+def find_local_browser(path_cfg=''):
+    """定位本机 Chrome/Edge；path_cfg 为设置页显式配置的路径，优先使用"""
+    cands = [path_cfg] if path_cfg else []
+    if os.name == 'nt':
+        for env in ('ProgramFiles', 'ProgramFiles(x86)', 'LOCALAPPDATA'):
+            base = os.environ.get(env)
+            if not base:
+                continue
+            cands.append(os.path.join(base, 'Google', 'Chrome', 'Application', 'chrome.exe'))
+            cands.append(os.path.join(base, 'Microsoft', 'Edge', 'Application', 'msedge.exe'))
+    else:
+        cands += ['/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser']
+    for path in cands:
+        if path and os.path.isfile(path):
+            return path
+    return ''
+
+
+def start_local_browser(port=DESKTOP_LOCAL_PORT, path_cfg=''):
+    """拉起本地桌面浏览器（有头、固定 profile、开放 CDP 端口），返回可连接的地址"""
+    address = '127.0.0.1:%d' % port
+    if cdp_version(address, 2):
+        logger.info('复用已运行的本地桌面浏览器: %s' % address)
+        return address
+    exe = find_local_browser(path_cfg)
+    if not exe:
+        raise RuntimeError('未找到本地 Chrome/Edge，请在设置页填写「桌面浏览器路径」')
+    os.makedirs(DESKTOP_PROFILE_DIR, exist_ok=True)
+    args = [
+        exe,
+        '--remote-debugging-port=%d' % port,
+        '--remote-debugging-address=127.0.0.1',
+        '--user-data-dir=%s' % DESKTOP_PROFILE_DIR,
+        '--no-first-run', '--no-default-browser-check',
+        '--disable-blink-features=AutomationControlled',
+        '--remote-allow-origins=*',
+        '--window-size=1280,900',
+    ]
+    kwargs = {}
+    if os.name == 'nt':
+        # 独立进程组/会话：浏览器是长驻共享资源，不应随调用方（脚本/服务）退出被带走
+        kwargs['creationflags'] = (getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
+                                   | getattr(subprocess, 'DETACHED_PROCESS', 0))
+    logger.info('拉起本地桌面浏览器: %s（profile=%s）' % (exe, DESKTOP_PROFILE_DIR))
+    try:
+        subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs)
+    except Exception as e:
+        raise RuntimeError('启动本地浏览器失败: %s' % e)
+
+    for _ in range(40):
+        if cdp_version(address, 1):
+            return address
+        time.sleep(0.5)
+    raise RuntimeError('本地桌面浏览器启动超时（%s 未监听，profile 可能被其它进程占用）' % address)
+
+
+def resolve_desktop_address(address_cfg='', path_cfg='', port=DESKTOP_LOCAL_PORT):
+    """解析桌面浏览器(CDP)地址，返回 (address, 说明)；address 为 None 时说明即失败原因。
+
+    取值顺序：设置页显式地址（local 表示强制本地拉起）> Windows 本地拉起 >
+    候选远端地址探测。NAS 无桌面环境，只能连远端浏览器。
+    """
+    cfg = (address_cfg or '').strip()
+    if cfg.lower().startswith('http'):
+        cfg = cfg.split('://', 1)[1]
+    if cfg.lower() == 'auto':
+        cfg = ''
+
+    if cfg:
+        if cfg.lower() == 'local':
+            try:
+                return start_local_browser(port, path_cfg), '本地拉起'
+            except RuntimeError as e:
+                return None, str(e)
+        addr = cfg.rstrip('/')
+        _ensure_no_proxy(addr)
+        ver = cdp_version(addr)
+        if ver:
+            return addr, ver.get('Browser') or '远程浏览器'
+        return None, ('桌面浏览器地址 %s 无法连接：请确认浏览器已启动、端口已转发'
+                      '（NAS 上还需组网/SSH 隧道就绪）' % addr)
+
+    if os.name == 'nt':
+        try:
+            return start_local_browser(port, path_cfg), '本地拉起'
+        except RuntimeError as e:
+            logger.warning('本地桌面浏览器不可用（%s），改为探测远端 CDP' % e)
+
+    for addr in DESKTOP_CANDIDATE_ADDRESSES:
+        _ensure_no_proxy(addr)
+        ver = cdp_version(addr, 2)
+        if ver:
+            return addr, ver.get('Browser') or '远程浏览器'
+    return None, ('未找到可用的桌面浏览器：Windows 请安装 Chrome/Edge 或在设置页填写地址；'
+                  'NAS 请在设置页填写桌面浏览器地址（如 100.100.1.10:9222）')
 
 
 def _terminate_process(pid, wait_seconds=3):
@@ -75,6 +233,19 @@ def _debug_screenshot(driver, name):
         logger.debug("截图保存失败: %s" % e)
 
 
+def _clean_cookie_text(value):
+    """剔除控制字符：CDP 收到换行/制表符会整批拒收（曾出现「成功设置 0/6 个 Cookie」）"""
+    if value is None:
+        return ''
+    return ''.join(ch for ch in str(value) if ch >= ' ')
+
+
+def _looks_like_cf_challenge(html):
+    """是否为 Cloudflare 挑战页（interstitial），内嵌 Turnstile 的正常页面不算"""
+    html = html or ''
+    return any(k in html for k in CF_CHALLENGE_MARKERS)
+
+
 class BrowserDriver(ABC):
     @abstractmethod
     def open(self, url): pass
@@ -111,8 +282,38 @@ class BrowserDriver(ABC):
 
 
 class DrissionPageDriver(BrowserDriver):
-    def __init__(self, headless=False):
-        # 每个实例独立临时目录，用完即删
+    def __init__(self, headless=False, address=None):
+        self.is_remote = bool(address)
+        self.address = (address or '').strip() or None
+        self.site_domain = None       # 供 set_cookies 给 cf_ 开头的 cookie 指定域名
+        self.temp_dir = None
+        try:
+            self.cf_retry = int(get_config('cf_retry') or 3)
+        except Exception:
+            self.cf_retry = 3
+        try:
+            self.cf_backoff = int(get_config('cf_backoff') or 5)
+        except Exception:
+            self.cf_backoff = 5
+
+        if self.is_remote:
+            # 远程模式：接管已有浏览器，复用它真实指纹与 profile；不创建临时目录、不启动本地进程
+            _ensure_no_proxy(self.address)
+            if not cdp_version(self.address):
+                raise RuntimeError('CDP 连接失败：%s 不可达' % self.address)
+            ensure_page_tab(self.address)
+            co = ChromiumOptions()
+            co.set_address(self.address)
+            logger.info('连接已有浏览器(CDP): %s' % self.address)
+            self.page = ChromiumPage(co)
+            try:
+                # 跨机/跨境连 CDP 时导航等待需要放宽，否则慢页面被判超时
+                self.page.set.timeouts(page_load=40)
+            except Exception:
+                pass
+            return
+
+        # 本地模式：每个实例独立临时目录，用完即删
         self.temp_dir = tempfile.mkdtemp(prefix='autosign_chrome_')
         co = ChromiumOptions()
         if headless:
@@ -130,6 +331,18 @@ class DrissionPageDriver(BrowserDriver):
 
     def open(self, url):
         self.page.get(url)
+        # 挑战页退避重载：CF 托管挑战常先返回一张 interstitial 页，重载后即可拿到真页面
+        for i in range(max(0, self.cf_retry)):
+            if not _looks_like_cf_challenge(self.get_page_source()):
+                return
+            logger.info('检测到 Cloudflare 挑战页，%d 秒后重新加载（%d/%d）'
+                        % (self.cf_backoff, i + 1, self.cf_retry))
+            time.sleep(self.cf_backoff)
+            try:
+                self.page.get(url)
+            except Exception as e:
+                logger.debug('挑战页重载失败: %s' % e)
+                return
 
     def get_cookies(self):
         raw = self.page.cookies()
@@ -156,13 +369,19 @@ class DrissionPageDriver(BrowserDriver):
 
     def set_cookies(self, cookies_list):
         allowed_keys = {'name', 'value', 'domain', 'path', 'expires', 'httpOnly', 'secure'}
-        domain = urlparse(self.page.url).netloc
+        page_domain = urlparse(self.page.url).netloc
         success_count = 0
         for c in cookies_list:
             clean = {k: v for k, v in c.items() if k in allowed_keys}
-            if 'name' not in clean or 'value' not in clean:
+            name = _clean_cookie_text(clean.get('name'))
+            if not name:
                 continue
-            clean.setdefault('domain', domain)
+            clean['name'] = name
+            clean['value'] = _clean_cookie_text(clean.get('value'))
+            # cf_clearance 等绑定具体域名，显式指定站点域名，避免沿用页面跳转后的空域名
+            if name.startswith('cf_') or name.startswith('__cf'):
+                clean['domain'] = self.site_domain or clean.get('domain') or page_domain
+            clean.setdefault('domain', page_domain)
             clean.setdefault('path', '/')
             if 'expires' in clean and (clean['expires'] is None or clean['expires'] == -1):
                 del clean['expires']
@@ -227,6 +446,9 @@ class DrissionPageDriver(BrowserDriver):
             return None
 
     def close(self):
+        if self.is_remote:
+            self._close_remote_tab()
+            return
         # 先记录进程号：DrissionPage 关闭时依赖 psutil，新版 psutil 可能抛错导致进程残留
         try:
             pid = self.page.process_id
@@ -243,6 +465,29 @@ class DrissionPageDriver(BrowserDriver):
             shutil.rmtree(self.temp_dir, ignore_errors=True)
         except Exception as e:
             logger.warning("清理临时目录失败: %s" % e)
+
+    def _close_remote_tab(self):
+        """远程模式只关本次用的标签，绝不 quit / 杀进程（那是共享浏览器）"""
+        tab_id = None
+        try:
+            tab_id = self.page.tab_id
+        except Exception:
+            pass
+        if not self.address:
+            return
+        # 先补一个空白标签再关自己的：Chrome 关掉最后一个标签会直接退出进程
+        try:
+            requests.put('http://%s/json/new?about:blank' % self.address,
+                         timeout=5, proxies=NO_PROXY_MAP)
+        except Exception as e:
+            logger.debug('补建标签页失败: %s' % e)
+        if tab_id:
+            try:
+                requests.get('http://%s/json/close/%s' % (self.address, tab_id),
+                             timeout=5, proxies=NO_PROXY_MAP)
+            except Exception as e:
+                logger.debug('关闭标签页异常: %s' % e)
+        ensure_page_tab(self.address)
 
 
 # ---------------- 页面判断 ----------------
@@ -837,10 +1082,15 @@ class BrowserExecutor(BaseExecutor):
     mode = 'browser'
     label = '浏览器模式'
     description = '模拟真人打开网页完成登录与签到，适合有按钮点击、验证码、Cloudflare 的站点'
+    min_cf_timeout = 0        # 桌面(CDP)模式需要更长的挑战等待，由子类抬高下限
 
     def __init__(self, ctx):
         BaseExecutor.__init__(self, ctx)
         self.driver = None
+
+    def _make_driver(self, headless):
+        """创建浏览器驱动；桌面(CDP)模式覆写本方法改为复用已有浏览器"""
+        return DrissionPageDriver(headless=headless)
 
     # 供外部（如API模式刷新Cookie）复用的站点字典
     def _site_for_login(self):
@@ -859,9 +1109,10 @@ class BrowserExecutor(BaseExecutor):
 
         headless = get_config('headless') == '1'
         cf_timeout = int(get_config('cf_timeout') or 60) if has_cloudflare else 0
+        cf_timeout = max(cf_timeout, self.min_cf_timeout)
 
         try:
-            self.driver = DrissionPageDriver(headless=headless)
+            self.driver = self._make_driver(headless)
 
             if login_first and login_url:
                 # ===== 登录优先模式 =====
@@ -962,10 +1213,11 @@ class BrowserExecutor(BaseExecutor):
 
         has_cloudflare = bool(site.get('has_cloudflare', 0))
         cf_timeout = int(get_config('cf_timeout') or 60) if has_cloudflare else 0
+        cf_timeout = max(cf_timeout, self.min_cf_timeout)
         headless = get_config('headless') == '1'
 
         try:
-            self.driver = DrissionPageDriver(headless=headless)
+            self.driver = self._make_driver(headless)
             self.driver.open(login_url)
             self.driver.wait_for_load(5)
             if ctx.cookies:
@@ -1057,3 +1309,51 @@ class BrowserExecutor(BaseExecutor):
             time.sleep(3)
         except Exception as e:
             logger.debug('页面滚动失败: %s' % e)
+
+
+class DesktopBrowserUnavailable(Exception):
+    """桌面浏览器(CDP)不可用，直接告警而不走重试"""
+
+
+@register_executor
+class DesktopBrowserExecutor(BrowserExecutor):
+    mode = 'desktop'
+    label = '桌面浏览器模式(CDP)'
+    description = '复用已有桌面 Chromium/Chrome（真实 GPU 指纹与登录态）经 CDP 驱动，专解 Cloudflare 托管挑战站点'
+    min_cf_timeout = 60
+
+    def __init__(self, ctx):
+        BrowserExecutor.__init__(self, ctx)
+        self.browser_address = None
+        self.site_domain = ''
+
+    def _site_for_login(self):
+        site = BrowserExecutor._site_for_login(self)
+        # 该模式就是给 CF 站点准备的：站点未勾选也走一遍挑战等待（无挑战时约 1 秒直接通过）
+        site['has_cloudflare'] = 1
+        return site
+
+    def _make_driver(self, headless):
+        addr, note = resolve_desktop_address(
+            get_config('desktop_browser_address') or '',
+            get_config('desktop_browser_path') or '',
+        )
+        if not addr:
+            raise DesktopBrowserUnavailable(note)
+        self.browser_address = addr
+        self.site_domain = urlparse(
+            self.ctx.site.get('login_url') or self.ctx.site.get('sign_url') or '').netloc
+        self.ctx.log('桌面浏览器(CDP)：%s（%s）' % (addr, note))
+        try:
+            driver = DrissionPageDriver(headless=False, address=addr)
+        except Exception as e:
+            raise DesktopBrowserUnavailable('连接桌面浏览器失败: %s' % e)
+        driver.site_domain = self.site_domain
+        return driver
+
+    def run(self):
+        try:
+            return BrowserExecutor.run(self)
+        except DesktopBrowserUnavailable as e:
+            self.ctx.log('桌面浏览器不可用：%s' % e, 'error')
+            return SignResult(False, '桌面浏览器不可用')

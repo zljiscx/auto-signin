@@ -583,8 +583,8 @@
 
     function switchMode() {
         var m = document.getElementById('modeSelect').value;
-        // browser / browser_api 都需要浏览器登录相关字段（账号密码、选择器）
-        var isBrowser = (m === 'browser' || m === 'browser_api');
+        // browser / browser_api / desktop 都需要浏览器登录相关字段（账号密码、选择器）
+        var isBrowser = (m === 'browser' || m === 'browser_api' || m === 'desktop');
         // api / browser_api 都需要 API 接口配置（browser_api 用浏览器登录、API签到）
         var hasApi = (m === 'api' || m === 'browser_api');
         var isBuddy = (m === 'buddy');
@@ -602,7 +602,7 @@
         refreshLoginSection();
         var signUrl = document.getElementById('signUrl');
         var loginUrl = document.getElementById('loginUrl');
-        if (m === 'browser') {
+        if (m === 'browser' || m === 'desktop') {
             signUrl.setAttribute('required', 'required');
         } else {
             signUrl.removeAttribute('required');

@@ -757,6 +757,12 @@ def settings():
             if cf_timeout_val:
                 set_config('cf_timeout', cf_timeout_val)
 
+            # 桌面浏览器模式(CDP)：留空为自动（Windows 拉起本地浏览器，NAS 探测远端地址）
+            set_config('desktop_browser_address',
+                       request.form.get('desktop_browser_address', '').strip())
+            set_config('desktop_browser_path',
+                       request.form.get('desktop_browser_path', '').strip())
+
             flash('全局设置已保存', 'success')
         except Exception as e:
             flash(f'保存失败: {str(e)}', 'danger')
@@ -773,7 +779,9 @@ def settings():
         'ocr_api_configured': bool(configs.get('ocr_api_key', '')),
         'ocr_secret_configured': bool(configs.get('ocr_secret_key', '')),
         'wecom_configured': wecom_configured,
-        'cf_timeout': configs.get('cf_timeout', '60')
+        'cf_timeout': configs.get('cf_timeout', '60'),
+        'desktop_browser_address': configs.get('desktop_browser_address', ''),
+        'desktop_browser_path': configs.get('desktop_browser_path', '')
     }
     return render_template('settings.html', configs=display_configs, sign_times=sign_times)
 
