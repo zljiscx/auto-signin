@@ -233,6 +233,27 @@ def _debug_screenshot(driver, name):
         logger.debug("截图保存失败: %s" % e)
 
 
+def _page_text(driver, limit=300):
+    """取页面可见文本：HTML 前 500 字符永远是 <head>，对定位失败没有帮助"""
+    try:
+        text = driver.run_js('return document.body ? document.body.innerText : "";') or ''
+        return ' '.join(str(text).split())[:limit]
+    except Exception:
+        return ''
+
+
+def _accept_dialog(driver, timeout=0.8):
+    """关掉 alert/confirm 弹窗（签到确认框），返回弹窗文本；无弹窗返回空串"""
+    try:
+        text = driver.page.handle_alert(accept=True, timeout=timeout)
+        if text:
+            logger.info("处理页面弹窗: %s" % text)
+            return str(text)
+    except Exception as e:
+        logger.debug("弹窗处理异常: %s" % e)
+    return ''
+
+
 def _clean_cookie_text(value):
     """剔除控制字符：CDP 收到换行/制表符会整批拒收（曾出现「成功设置 0/6 个 Cookie」）"""
     if value is None:
@@ -867,7 +888,7 @@ def _has_turnstile(driver):
 
 
 def _handle_turnstile(driver, timeout=30):
-    """处理Cloudflare Turnstile验证：只在checkbox可见时点击，其它状态等待"""
+    """处理 Cloudflare Turnstile：以响应 token 为准，token 为空即未通过"""
     if not _has_turnstile(driver):
         return True
 
@@ -886,16 +907,22 @@ def _handle_turnstile(driver, timeout=30):
 
     start = time.time()
     click_count = 0
+    got_token = False
 
     while time.time() - start < timeout:
-        if _turnstile_token_len(driver) > 20:
-            logger.info("Turnstile验证已通过")
+        token_len = _turnstile_token_len(driver)
+        if token_len > 20:
+            got_token = True
+            logger.info("Turnstile验证已通过（token %d 字符）" % token_len)
             return True
 
         html = driver.get_page_source() or ''
         if 'cf-turnstile' not in html and 'challenges.cloudflare.com' not in html:
-            logger.info("Turnstile组件已消失，验证通过")
-            return True
+            if got_token:
+                logger.info("Turnstile组件已消失，验证通过")
+                return True
+            logger.warning("Turnstile组件已消失但未拿到token，判定未通过")
+            return False
 
         turnstile_state = _check_turnstile_state_cdp(driver)
 
@@ -910,14 +937,14 @@ def _handle_turnstile(driver, timeout=30):
 
         time.sleep(2)
 
-    if _turnstile_token_len(driver) > 20:
+    token_len = _turnstile_token_len(driver)
+    if token_len > 20:
+        logger.info("Turnstile验证已通过（token %d 字符）" % token_len)
         return True
 
-    html = driver.get_page_source() or ''
-    if 'Verify you are human' not in html and '请验证您是真人' not in html and 'Just a moment' not in html:
-        return True
-
-    logger.warning("Turnstile验证超时（共点击%s次）" % click_count)
+    logger.warning("Turnstile验证未通过：%d 秒内未拿到响应token（点击%s次）。"
+                   "无头浏览器常被判定为机器人，建议该站点改用桌面浏览器模式(CDP)"
+                   % (timeout, click_count))
     return False
 
 
@@ -1128,7 +1155,7 @@ class BrowserExecutor(BaseExecutor):
                 self._scroll_page()
 
                 if has_cloudflare and not _wait_cloudflare(self.driver, cf_timeout, ctx.is_manual):
-                    return SignResult(False, 'Cloudflare验证超时', ctx.cookies)
+                    return SignResult(False, 'Cloudflare验证未通过（Turnstile无token，建议改用桌面模式）', ctx.cookies)
 
                 if is_logged_in(self.driver):
                     ctx.log('登录优先模式：已登录，更新Cookie并前往签到页')
@@ -1146,7 +1173,7 @@ class BrowserExecutor(BaseExecutor):
                 self.driver.wait_for_load(10)
                 time.sleep(2)
                 if has_cloudflare and not _wait_cloudflare(self.driver, cf_timeout, ctx.is_manual):
-                    return SignResult(False, 'Cloudflare验证超时（签到页）', ctx.cookies)
+                    return SignResult(False, 'Cloudflare验证未通过（签到页，建议改用桌面模式）', ctx.cookies)
             else:
                 # ===== 正常模式 =====
                 self.driver.open(sign_url)
@@ -1161,7 +1188,7 @@ class BrowserExecutor(BaseExecutor):
                 self._scroll_page()
 
                 if has_cloudflare and not _wait_cloudflare(self.driver, cf_timeout, ctx.is_manual):
-                    return SignResult(False, 'Cloudflare验证超时', ctx.cookies)
+                    return SignResult(False, 'Cloudflare验证未通过（Turnstile无token，建议改用桌面模式）', ctx.cookies)
 
                 if is_login_page(self.driver) or (login_url and login_url in (self.driver.get_current_url() or '')):
                     if not perform_login(self.driver, site, ctx.ocr_config, cf_timeout):
@@ -1173,7 +1200,7 @@ class BrowserExecutor(BaseExecutor):
                     self.driver.wait_for_load(10)
                     time.sleep(2)
                     if has_cloudflare and not _wait_cloudflare(self.driver, cf_timeout, ctx.is_manual):
-                        return SignResult(False, 'Cloudflare验证超时（签到页）', ctx.cookies)
+                        return SignResult(False, 'Cloudflare验证未通过（签到页，建议改用桌面模式）', ctx.cookies)
 
             keywords = ctx.success_keywords
             html = self.driver.get_page_source() or ''
@@ -1181,17 +1208,27 @@ class BrowserExecutor(BaseExecutor):
                 ctx.log('签到成功（检测到标识）')
                 return SignResult(True, '签到成功', ctx.cookies)
 
+            _accept_dialog(self.driver)
             if click_sign_button(self.driver, site):
-                time.sleep(3)
-                html_after = self.driver.get_page_source() or ''
-                if any(kw in html_after for kw in keywords):
-                    ctx.log('签到成功（点击按钮后）')
-                    return SignResult(True, '签到成功', ctx.cookies)
-                ctx.log('点击后未检测到成功标识（页面片段：%s）' % ((html_after or '')[:500]))
-                return SignResult(False, '签到失败', ctx.cookies, html_after[:500])
+                # 有的站点点完弹 confirm，弹窗不关页面不会跳转
+                for _ in range(8):
+                    time.sleep(1)
+                    _accept_dialog(self.driver)
+                    try:
+                        html_after = self.driver.get_page_source() or ''
+                    except Exception:
+                        html_after = ''
+                    if any(kw in html_after for kw in keywords):
+                        ctx.log('签到成功（点击按钮后）')
+                        return SignResult(True, '签到成功', ctx.cookies)
+                text = _page_text(self.driver)
+                ctx.log('点击后未检测到成功标识（页面文字：%s）' % (text or '空'))
+                _debug_screenshot(self.driver, 'sign_no_success')
+                return SignResult(False, '签到失败', ctx.cookies, text[:500])
 
-            ctx.log('未找到签到按钮且无成功标识')
-            return SignResult(False, '签到失败', ctx.cookies)
+            text = _page_text(self.driver)
+            ctx.log('未找到签到按钮且无成功标识（页面文字：%s）' % (text or '空'))
+            return SignResult(False, '签到失败', ctx.cookies, text[:500])
         finally:
             if self.driver:
                 try:
@@ -1229,7 +1266,7 @@ class BrowserExecutor(BaseExecutor):
             time.sleep(3)
 
             if has_cloudflare and not _wait_cloudflare(self.driver, cf_timeout, ctx.is_manual):
-                return False, 'Cloudflare验证超时，无法刷新Cookie'
+                return False, 'Cloudflare验证未通过，无法刷新Cookie'
 
             if is_logged_in(self.driver) and self._page_shows_logout(self.driver):
                 ctx.set_cookies(self.driver.get_cookies())
