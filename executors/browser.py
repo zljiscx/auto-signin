@@ -13,6 +13,7 @@ import shutil
 import tempfile
 import logging
 import subprocess
+import threading
 from abc import ABC, abstractmethod
 from urllib.parse import urlparse
 
@@ -82,6 +83,42 @@ def _cdp_tabs(address, timeout=3):
         return []
 
 
+def forget_page_cache(address=None):
+    """清 DrissionPage 两级缓存：页面实例(_PAGES) 与浏览器连接(BROWSERS)。
+
+    只清其中一层的话，重连拿到的仍是已断开的旧对象，表现为「与页面的连接已断开」。
+    """
+    try:
+        from DrissionPage._base.browser import Browser
+        for bid, browser in list(Browser.BROWSERS.items()):
+            if address is None or getattr(browser, 'address', None) == address:
+                Browser.BROWSERS.pop(bid, None)
+    except Exception as e:
+        logger.debug('清理浏览器缓存异常: %s' % e)
+    try:
+        for key, page in list(ChromiumPage._PAGES.items()):
+            if address is None or getattr(page, 'address', None) == address:
+                ChromiumPage._PAGES.pop(key, None)
+    except Exception as e:
+        logger.debug('清理页面缓存异常: %s' % e)
+
+
+def probe_alive(driver, timeout=5):
+    """探活：断开后首次调用会抛异常，但半死连接可能一直阻塞，所以放线程里限时"""
+    box = {}
+
+    def target():
+        try:
+            box['ok'] = driver.run_js('return 1') is not None
+        except Exception:
+            box['ok'] = False
+
+    th = threading.Thread(target=target, daemon=True)
+    th.start()
+    th.join(timeout)
+    return not th.is_alive() and bool(box.get('ok'))
+
+
 def ensure_page_tab(address):
     """保证至少有一个 page 标签：远程连接会接管标签，关光了就再也连不上"""
     if any(t.get('type') == 'page' for t in _cdp_tabs(address)):
@@ -93,6 +130,21 @@ def ensure_page_tab(address):
     except Exception as e:
         logger.debug('补建标签页失败: %s' % e)
         return False
+
+
+# 远程浏览器连接复用：断开后重连会被 Chrome 踢掉，整进程只连一次
+_REMOTE_DRIVERS = {}
+
+
+def get_remote_driver(address):
+    """取得（或建立）该地址的共享驱动；连接已死时清缓存重连"""
+    driver = _REMOTE_DRIVERS.get(address)
+    if driver is not None and probe_alive(driver):
+        return driver
+    forget_page_cache(address)
+    driver = DrissionPageDriver(headless=False, address=address)
+    _REMOTE_DRIVERS[address] = driver
+    return driver
 
 
 def find_local_browser(path_cfg=''):
@@ -488,27 +540,14 @@ class DrissionPageDriver(BrowserDriver):
             logger.warning("清理临时目录失败: %s" % e)
 
     def _close_remote_tab(self):
-        """远程模式只关本次用的标签，绝不 quit / 杀进程（那是共享浏览器）"""
-        tab_id = None
-        try:
-            tab_id = self.page.tab_id
-        except Exception:
-            pass
+        """远程模式结束：标签退回 about:blank，连接保留给下次复用"""
         if not self.address:
             return
-        # 先补一个空白标签再关自己的：Chrome 关掉最后一个标签会直接退出进程
         try:
-            requests.put('http://%s/json/new?about:blank' % self.address,
-                         timeout=5, proxies=NO_PROXY_MAP)
+            self.page.get('about:blank')
         except Exception as e:
-            logger.debug('补建标签页失败: %s' % e)
-        if tab_id:
-            try:
-                requests.get('http://%s/json/close/%s' % (self.address, tab_id),
-                             timeout=5, proxies=NO_PROXY_MAP)
-            except Exception as e:
-                logger.debug('关闭标签页异常: %s' % e)
-        ensure_page_tab(self.address)
+            logger.debug('远程页面复位失败: %s' % e)
+            _REMOTE_DRIVERS.pop(self.address, None)
 
 
 # ---------------- 页面判断 ----------------
@@ -887,53 +926,70 @@ def _has_turnstile(driver):
     return False
 
 
+def _turnstile_rect(driver):
+    """取 Turnstile 组件在视口中的位置：跨域 iframe 的文字读不到，只能靠坐标点"""
+    js = '''
+    var sels = ['.cf-turnstile', '[data-sitekey]', 'iframe[src*="challenges.cloudflare.com"]'];
+    for (var i = 0; i < sels.length; i++) {
+      var el = document.querySelector(sels[i]);
+      if (!el) continue;
+      el.scrollIntoView({block: 'center'});
+      var r = el.getBoundingClientRect();
+      if (r.width > 20 && r.height > 20) {
+        return JSON.stringify({x: r.x, y: r.y, w: r.width, h: r.height});
+      }
+    }
+    return '';
+    '''
+    try:
+        raw = driver.run_js(js)
+        return json.loads(raw) if raw else None
+    except Exception:
+        return None
+
+
+def _click_turnstile(driver, rect):
+    """在组件左侧复选框位置派发真实鼠标事件（CDP 事件被浏览器视为可信操作）"""
+    x = rect['x'] + 30
+    y = rect['y'] + rect['h'] / 2
+    page = driver.page
+    try:
+        page.run_cdp('Input.dispatchMouseEvent', type='mouseMoved', x=x, y=y)
+        time.sleep(0.2)
+        page.run_cdp('Input.dispatchMouseEvent', type='mousePressed',
+                     x=x, y=y, button='left', clickCount=1)
+        time.sleep(0.08)
+        page.run_cdp('Input.dispatchMouseEvent', type='mouseReleased',
+                     x=x, y=y, button='left', clickCount=1)
+        return True
+    except Exception as e:
+        logger.debug("Turnstile点击失败: %s" % e)
+        return False
+
+
 def _handle_turnstile(driver, timeout=30):
-    """处理 Cloudflare Turnstile：以响应 token 为准，token 为空即未通过"""
+    """处理 Cloudflare Turnstile：以响应 token 为准，点击只按组件坐标"""
     if not _has_turnstile(driver):
         return True
 
     logger.info("检测到Cloudflare Turnstile验证组件")
 
-    try:
-        if os.path.isdir(DEBUG_SCREENSHOT_DIR):
-            for fname in os.listdir(DEBUG_SCREENSHOT_DIR):
-                if fname.startswith('cf_'):
-                    try:
-                        os.remove(os.path.join(DEBUG_SCREENSHOT_DIR, fname))
-                    except Exception:
-                        pass
-    except Exception as e:
-        logger.debug("清理旧截图失败: %s" % e)
-
     start = time.time()
     click_count = 0
-    got_token = False
 
     while time.time() - start < timeout:
         token_len = _turnstile_token_len(driver)
         if token_len > 20:
-            got_token = True
             logger.info("Turnstile验证已通过（token %d 字符）" % token_len)
             return True
 
-        html = driver.get_page_source() or ''
-        if 'cf-turnstile' not in html and 'challenges.cloudflare.com' not in html:
-            if got_token:
-                logger.info("Turnstile组件已消失，验证通过")
-                return True
-            logger.warning("Turnstile组件已消失但未拿到token，判定未通过")
-            return False
-
-        turnstile_state = _check_turnstile_state_cdp(driver)
-
-        if turnstile_state != 'need_click':
-            time.sleep(2)
+        rect = _turnstile_rect(driver)
+        if rect:
+            click_count += 1
+            logger.info("第%s次点击Turnstile复选框（%.0fx%.0f）" % (click_count, rect['w'], rect['h']))
+            _click_turnstile(driver, rect)
+            time.sleep(3)
             continue
-
-        click_count += 1
-        logger.info("第%s次CF验证点击" % click_count)
-        _click_turnstile_checkbox(driver)
-        _debug_screenshot(driver, 'cf_click_%s' % click_count)
 
         time.sleep(2)
 
@@ -943,119 +999,9 @@ def _handle_turnstile(driver, timeout=30):
         return True
 
     logger.warning("Turnstile验证未通过：%d 秒内未拿到响应token（点击%s次）。"
-                   "无头浏览器常被判定为机器人，建议该站点改用桌面浏览器模式(CDP)"
+                   "若组件不可见，说明该浏览器被判定为机器人，换真实桌面浏览器再试"
                    % (timeout, click_count))
     return False
-
-
-def _check_turnstile_state_cdp(driver):
-    """用CDP穿透shadow root检测Turnstile checkbox状态"""
-    try:
-        result = driver.page.run_cdp('DOM.getDocument', depth=-1, pierce=True)
-        root_node = result.get('root', {})
-        return _search_turnstile_state_in_cdp_tree(root_node)
-    except Exception as e:
-        logger.debug("CDP状态检测失败: %s" % e)
-        return 'unknown'
-
-
-def _search_turnstile_state_in_cdp_tree(node):
-    """递归遍历CDP DOM树，查找Turnstile状态标识文本"""
-    if not isinstance(node, dict):
-        return 'unknown'
-
-    node_value = node.get('nodeValue')
-    if node_value:
-        if 'Verify you are human' in node_value or '请验证您是真人' in node_value:
-            return 'need_click'
-        if 'Verifying' in node_value or '正在验证' in node_value:
-            return 'verifying'
-
-    children = node.get('children', [])
-    if children:
-        for child in children:
-            state = _search_turnstile_state_in_cdp_tree(child)
-            if state != 'unknown':
-                return state
-
-    content_doc = node.get('contentDocument')
-    if content_doc:
-        state = _search_turnstile_state_in_cdp_tree(content_doc)
-        if state != 'unknown':
-            return state
-
-    shadow_roots = node.get('shadowRoots', [])
-    if shadow_roots:
-        for sr in shadow_roots:
-            state = _search_turnstile_state_in_cdp_tree(sr)
-            if state != 'unknown':
-                return state
-
-    return 'unknown'
-
-
-def _click_turnstile_checkbox(driver):
-    """点击Turnstile checkbox：通过CDP穿透shadow DOM查找iframe并获取位置点击"""
-    try:
-        result = driver.page.run_cdp('DOM.getDocument', depth=-1, pierce=True)
-        root_node = result.get('root', {})
-        iframe_pos = _find_turnstile_in_cdp_tree(driver, root_node)
-        if iframe_pos:
-            click_x = iframe_pos['x'] + 35
-            click_y = iframe_pos['y'] + 30
-            driver.page.run_cdp('Input.dispatchMouseEvent',
-                                type='mousePressed', x=click_x, y=click_y,
-                                button='left', clickCount=1)
-            driver.page.run_cdp('Input.dispatchMouseEvent',
-                                type='mouseReleased', x=click_x, y=click_y,
-                                button='left', clickCount=1)
-            logger.info("Turnstile: CDP定位坐标点击(%s, %s)" % (click_x, click_y))
-            return True
-    except Exception as e:
-        logger.debug("Turnstile CDP策略失败: %s" % e)
-
-    logger.warning("Turnstile: CDP未定位到iframe")
-    return False
-
-
-def _find_turnstile_in_cdp_tree(driver, node, depth=0):
-    """递归遍历CDP DOM树，查找Turnstile iframe并返回其位置"""
-    if depth > 50:
-        return None
-    attrs = node.get('attributes', [])
-    node_name = (node.get('nodeName') or '').lower()
-    if node_name == 'iframe':
-        for i, attr in enumerate(attrs):
-            if attr == 'id' and i + 1 < len(attrs) and 'cf-chl-widget' in attrs[i + 1]:
-                return _get_cdp_box_model(driver, node.get('backendNodeId'))
-            if attr == 'src' and i + 1 < len(attrs) and 'challenges.cloudflare.com' in attrs[i + 1]:
-                return _get_cdp_box_model(driver, node.get('backendNodeId'))
-    for child in node.get('children', []):
-        result = _find_turnstile_in_cdp_tree(driver, child, depth + 1)
-        if result:
-            return result
-    content = node.get('contentDocument')
-    if content:
-        result = _find_turnstile_in_cdp_tree(driver, content, depth + 1)
-        if result:
-            return result
-    for sr in node.get('shadowRoots', []):
-        result = _find_turnstile_in_cdp_tree(driver, sr, depth + 1)
-        if result:
-            return result
-    return None
-
-
-def _get_cdp_box_model(driver, backend_node_id):
-    """通过CDP获取元素的位置信息"""
-    try:
-        result = driver.page.run_cdp('DOM.getBoxModel', backendNodeId=backend_node_id)
-        content = result.get('model', {}).get('content', [])
-        if len(content) >= 4:
-            return {'x': content[0], 'y': content[1]}
-    except Exception:
-        pass
-    return None
 
 
 def _wait_cloudflare(driver, timeout=60, is_manual=False):
@@ -1381,12 +1327,21 @@ class DesktopBrowserExecutor(BrowserExecutor):
         self.site_domain = urlparse(
             self.ctx.site.get('login_url') or self.ctx.site.get('sign_url') or '').netloc
         self.ctx.log('桌面浏览器(CDP)：%s（%s）' % (addr, note))
-        try:
-            driver = DrissionPageDriver(headless=False, address=addr)
-        except Exception as e:
-            raise DesktopBrowserUnavailable('连接桌面浏览器失败: %s' % e)
-        driver.site_domain = self.site_domain
-        return driver
+        last_err = None
+        for _ in range(3):
+            try:
+                driver = get_remote_driver(addr)
+                if probe_alive(driver):
+                    driver.site_domain = self.site_domain
+                    return driver
+                last_err = '调试连接不可用'
+            except Exception as e:
+                last_err = e
+            # 连接已坏：丢掉共享实例并清 DrissionPage 缓存后重连
+            _REMOTE_DRIVERS.pop(addr, None)
+            forget_page_cache(addr)
+            time.sleep(2)
+        raise DesktopBrowserUnavailable('连接桌面浏览器失败: %s' % last_err)
 
     def run(self):
         try:

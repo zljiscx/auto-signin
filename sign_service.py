@@ -12,6 +12,29 @@ from executors import SignContext, get_executor, get_mode_label
 logger = logging.getLogger(__name__)
 _sign_lock = threading.Lock()
 
+# 单站单次执行上限：远端 CDP 连接断开时 DrissionPage 会一直阻塞，必须能放弃
+SITE_ATTEMPT_TIMEOUT = 240
+
+
+def _run_with_timeout(executor, timeout=SITE_ATTEMPT_TIMEOUT):
+    """执行器放进线程跑，超时抛 TimeoutError；残留线程自行结束，不阻塞后续站点"""
+    box = {}
+
+    def target():
+        try:
+            box['result'] = executor.run()
+        except Exception as e:
+            box['error'] = e
+
+    th = threading.Thread(target=target, daemon=True)
+    th.start()
+    th.join(timeout)
+    if th.is_alive():
+        raise TimeoutError('执行超过 %d 秒未返回，已放弃本次尝试' % timeout)
+    if 'error' in box:
+        raise box['error']
+    return box.get('result')
+
 
 def sign_site(site, ocr_config, retry_times=3, is_manual=False):
     """
@@ -39,7 +62,7 @@ def sign_site(site, ocr_config, retry_times=3, is_manual=False):
         for attempt in range(1, retry_times + 1):
             logger.info(f"站点「{name}」第 {attempt}/{retry_times} 次尝试")
             try:
-                result = get_executor(mode, ctx).run()
+                result = _run_with_timeout(get_executor(mode, ctx))
                 if result is None:
                     msg = '执行器未返回结果'
                 else:
