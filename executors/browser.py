@@ -12,7 +12,9 @@ import json
 import shutil
 import tempfile
 import logging
+import queue
 import subprocess
+import sys
 import threading
 from abc import ABC, abstractmethod
 from urllib.parse import urlparse
@@ -43,6 +45,10 @@ DESKTOP_PROFILE_DIR = os.path.join(PROJECT_ROOT, 'chrome_data', 'desktop')
 DESKTOP_LOCAL_PORT = 9333
 # 远端 CDP 候选地址：容器宿主(zljiscx) -> 组网固定入口 -> 本机
 DESKTOP_CANDIDATE_ADDRESSES = ('172.20.0.1:9222', '100.100.1.10:9222', '127.0.0.1:9222')
+# 桌面模式在工作子进程中执行，超时直接杀进程（比线程超时干净）
+DESKTOP_WORKER_PATH = os.path.join(PROJECT_ROOT, 'executors', 'desktop_worker.py')
+DESKTOP_WORKER_TIMEOUT = 200
+WORKER_RESULT_MARK = '__SIGN_RESULT__'
 # CF 挑战页（interstitial）特征：命中才考虑重载，避免误伤内嵌 Turnstile 的正常页面
 CF_CHALLENGE_MARKERS = (
     'Just a moment', 'cf-browser-verification', 'cf_chl_opt',
@@ -103,8 +109,11 @@ def forget_page_cache(address=None):
         logger.debug('清理页面缓存异常: %s' % e)
 
 
-def probe_alive(driver, timeout=5):
-    """探活：断开后首次调用会抛异常，但半死连接可能一直阻塞，所以放线程里限时"""
+def probe_alive(driver, timeout=12):
+    """探活：断开后首次调用会抛异常，但半死连接可能一直阻塞，所以放线程里限时。
+
+    跨机/跨网 CDP 单次命令可能几秒才回，超时过短会把好连接误判为死连接。
+    """
     box = {}
 
     def target():
@@ -136,12 +145,56 @@ def ensure_page_tab(address):
 _REMOTE_DRIVERS = {}
 
 
-def get_remote_driver(address):
-    """取得（或建立）该地址的共享驱动；连接已死时清缓存重连"""
-    driver = _REMOTE_DRIVERS.get(address)
-    if driver is not None and probe_alive(driver):
-        return driver
+def _fresh_page_tab(address):
+    """新建空白标签并关掉其它 page 标签，保证下一次附加落在干净标签上（旧标签可能已卡死）"""
+    new_id = None
+    try:
+        # 实测 GET /json/new 返回 405，必须用 PUT
+        r = requests.put('http://%s/json/new?about:blank' % address, timeout=5, proxies=NO_PROXY_MAP)
+        new_id = (r.json() or {}).get('id')
+    except Exception as e:
+        logger.debug('新建标签失败: %s' % e)
+        return False
+    for t in _cdp_tabs(address):
+        if t.get('type') != 'page' or t.get('id') == new_id:
+            continue
+        # 只清空白标签：非空白页可能是用户自己开的，不动
+        if (t.get('url') or '') not in ('about:blank', 'chrome://newtab/', 'chrome://new-tab-page/'):
+            continue
+        try:
+            requests.get('http://%s/json/close/%s' % (address, t['id']),
+                         timeout=8, proxies=NO_PROXY_MAP)
+        except Exception as e:
+            logger.debug('关闭旧标签失败: %s' % e)
+    return bool(new_id)
+
+
+def reset_remote_driver(address):
+    """丢弃共享连接：先断开旧页面的调试会话，再清 DrissionPage 两级缓存。
+
+    只清缓存不断开的话，旧会话仍挂在那个标签上，新连接与它抢同一个 target，
+    必然报「与页面的连接已断开」，且三次重试全部失败。
+    """
+    driver = _REMOTE_DRIVERS.pop(address, None)
+    if driver is not None:
+        try:
+            driver.page.disconnect()
+        except Exception as e:
+            logger.debug('断开旧调试会话失败: %s' % e)
     forget_page_cache(address)
+    _fresh_page_tab(address)
+
+
+def get_remote_driver(address):
+    """取得（或建立）该地址的共享驱动；连接已死时断开旧会话后重连"""
+    driver = _REMOTE_DRIVERS.get(address)
+    if driver is not None:
+        if probe_alive(driver):
+            return driver
+        logger.warning('远端浏览器连接已失效，重建连接')
+        reset_remote_driver(address)
+    else:
+        forget_page_cache(address)
     driver = DrissionPageDriver(headless=False, address=address)
     _REMOTE_DRIVERS[address] = driver
     return driver
@@ -547,7 +600,7 @@ class DrissionPageDriver(BrowserDriver):
             self.page.get('about:blank')
         except Exception as e:
             logger.debug('远程页面复位失败: %s' % e)
-            _REMOTE_DRIVERS.pop(self.address, None)
+            reset_remote_driver(self.address)
 
 
 # ---------------- 页面判断 ----------------
@@ -1337,15 +1390,117 @@ class DesktopBrowserExecutor(BrowserExecutor):
                 last_err = '调试连接不可用'
             except Exception as e:
                 last_err = e
-            # 连接已坏：丢掉共享实例并清 DrissionPage 缓存后重连
-            _REMOTE_DRIVERS.pop(addr, None)
-            forget_page_cache(addr)
+            # 连接已坏：断开旧会话并清 DrissionPage 缓存后重连
+            reset_remote_driver(addr)
             time.sleep(2)
         raise DesktopBrowserUnavailable('连接桌面浏览器失败: %s' % last_err)
 
     def run(self):
+        # 子进程隔离：DrissionPage 断连会污染整个进程，桌面模式必须一站一进程
+        if os.environ.get('AUTOSIGN_DESKTOP_INPROCESS') == '1':
+            return self._run_inprocess()
+        return self._run_in_worker()
+
+    def _run_inprocess(self):
         try:
             return BrowserExecutor.run(self)
         except DesktopBrowserUnavailable as e:
             self.ctx.log('桌面浏览器不可用：%s' % e, 'error')
             return SignResult(False, '桌面浏览器不可用')
+
+    def _run_in_worker(self):
+        """把签到放进独立子进程：连接断掉只毁这个子进程，不影响后续站点"""
+        payload = json.dumps({
+            'site': self.ctx.site,
+            'ocr': self.ctx.ocr_config,
+            'is_manual': self.ctx.is_manual,
+        }, ensure_ascii=False, default=str)
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, '-u', DESKTOP_WORKER_PATH],
+                cwd=PROJECT_ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, universal_newlines=True,
+                encoding='utf-8', errors='replace')
+        except Exception as e:
+            logger.error('启动桌面浏览器子进程失败: %s' % e)
+            return SignResult(False, '桌面浏览器不可用', None, '子进程启动失败: %s' % e)
+
+        try:
+            proc.stdin.write(payload)
+            proc.stdin.close()
+        except Exception as e:
+            logger.debug('写入子进程参数失败: %s' % e)
+
+        lines = []
+        result = None
+        line_queue = queue.Queue()
+
+        def _pump():
+            try:
+                for line in proc.stdout:
+                    line_queue.put(line)
+            finally:
+                line_queue.put(None)
+
+        threading.Thread(target=_pump, daemon=True).start()
+
+        deadline = time.time() + DESKTOP_WORKER_TIMEOUT
+        timed_out = False
+        while True:
+            remain = deadline - time.time()
+            if remain <= 0:
+                timed_out = True
+                break
+            try:
+                line = line_queue.get(timeout=min(remain, 5))
+            except queue.Empty:
+                if proc.poll() is not None:
+                    break
+                continue
+            if line is None:
+                break
+            line = line.rstrip('\r\n')
+            if not line:
+                continue
+            if line.startswith(WORKER_RESULT_MARK):
+                try:
+                    result = json.loads(line[len(WORKER_RESULT_MARK):])
+                except Exception as e:
+                    logger.warning('子进程结果解析失败: %s' % e)
+            else:
+                lines.append(line)
+                logger.info('[CDP] %s' % line)
+
+        if timed_out:
+            _kill_worker(proc)
+            logger.error('桌面浏览器子进程超时（%d 秒）已强制结束' % DESKTOP_WORKER_TIMEOUT)
+            return SignResult(False, '桌面浏览器执行超时（%d 秒）' % DESKTOP_WORKER_TIMEOUT)
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            _kill_worker(proc)
+
+        if not result:
+            tail = ' | '.join(lines[-3:]) if lines else '无输出'
+            logger.error('桌面浏览器子进程未返回结果，末尾输出：%s' % tail)
+            return SignResult(False, '桌面浏览器不可用', None, tail)
+
+        cookies = result.get('cookies') or None
+        if cookies:
+            try:
+                self.ctx.set_cookies(cookies)
+            except Exception as e:
+                logger.debug('回写Cookie到上下文失败: %s' % e)
+        if result.get('cookies_changed'):
+            self.ctx.cookies_changed = True
+        if result.get('browser_headers'):
+            self.ctx.browser_headers = result['browser_headers']
+        return SignResult(bool(result.get('success')), result.get('message') or '',
+                          cookies, result.get('detail') or '', result.get('appendix') or '')
+
+
+def _kill_worker(proc):
+    try:
+        proc.kill()
+    except Exception as e:
+        logger.debug('结束子进程失败: %s' % e)
